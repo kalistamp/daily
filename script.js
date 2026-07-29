@@ -35,7 +35,7 @@ const DEFAULTS = {
   githubToken: '',
   gistId:      'ead6fb9238714dfc51d0b3fea495e899',
   geminiKey:   '',
-  geminiModel: 'gemini-2.5-flash',
+  geminiModel: 'gemini-flash-latest',
   repo:        'kalistamp/Daily_ng',
   notesPath:   '2026/2026daily_pt1.md',
   branch:      'main',
@@ -204,7 +204,12 @@ async function geminiGenerate(model, systemText, userText) {
   };
   const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data?.error?.message || `Gemini request failed (${res.status}).`);
+  if (!res.ok) {
+    const err = new Error(data?.error?.message || `Gemini request failed (${res.status}).`);
+    err.status = res.status;
+    err.gstatus = data?.error?.status;
+    throw err;
+  }
   const cand = data?.candidates?.[0];
   const text = (cand?.content?.parts || []).map((p) => p.text || '').join('').trim();
   if (!text) {
@@ -222,6 +227,73 @@ async function geminiListModels() {
     .filter((m) => (m.supportedGenerationMethods || []).includes('generateContent'))
     .map((m) => m.name.replace(/^models\//, ''))
     .filter((n) => /gemini/i.test(n));
+}
+
+// Ordered fallback. Try the preferred model first (fast path). If it's
+// unavailable/deprecated, discover the models THIS key can actually use
+// (listModels only returns usable ones), rank them, and try each until one
+// works — then remember the winner so later runs start there.
+async function geminiGenerateSmart(preferred, systemText, userText, onModel) {
+  const tried = new Set();
+  const staticFallbacks = [
+    'gemini-flash-latest', 'gemini-2.5-flash', 'gemini-2.0-flash',
+    'gemini-pro-latest', 'gemini-2.5-pro', 'gemini-flash-lite-latest', 'gemini-2.0-flash-lite',
+  ];
+  let queue = [preferred, ...staticFallbacks].filter(Boolean);
+  let liveLoaded = false;
+  let lastErr = null;
+
+  for (let i = 0; i < queue.length; i++) {
+    const model = queue[i];
+    if (!model || tried.has(model)) continue;
+    tried.add(model);
+    if (onModel) onModel(model, tried.size > 1);
+    try {
+      const text = await geminiGenerate(model, systemText, userText);
+      rememberModel(model);
+      return { text, model, fellBack: model !== preferred };
+    } catch (e) {
+      lastErr = e;
+      // Only walk the fallback chain for "this model isn't available" errors.
+      // Auth / quota / safety / network errors stop immediately.
+      if (!isModelAvailabilityError(e)) throw e;
+      if (!liveLoaded) {
+        liveLoaded = true;
+        let live = [];
+        try { live = (await geminiListModels()).sort((a, b) => rankModel(b) - rankModel(a)); } catch (_) { /* keep static queue */ }
+        if (live.length) queue = queue.slice(0, i + 1).concat(live.filter((m) => !tried.has(m)));
+      }
+    }
+  }
+  throw new Error(`No available Gemini model worked (tried ${tried.size}). Last error: ${lastErr ? lastErr.message : 'unknown'}`);
+}
+
+function rememberModel(model) {
+  if (model === cfg().geminiModel) return;
+  setCfg('geminiModel', model);
+  ensureModelOption(model);
+  const sel = $('#set-gemini-model');
+  if (sel) sel.value = model;
+}
+
+function isModelAvailabilityError(e) {
+  if (e && e.status === 404) return true;
+  const m = ((e && e.message) || '').toLowerCase();
+  return /no longer available|not found|does not exist|is not supported|not supported for|unavailable|deprecated|call listmodels|unknown name|invalid model|not a valid/.test(m);
+}
+
+// Higher = preferred. Newer version > flash > pro > lite; penalize special/experimental variants.
+function rankModel(name) {
+  const n = (name || '').toLowerCase();
+  let score = 0;
+  const v = n.match(/(\d+)\.(\d+)/);
+  if (v) score += (parseInt(v[1], 10) * 10 + parseInt(v[2], 10)) * 100;
+  if (n.includes('flash') && !n.includes('lite')) score += 50;
+  else if (n.includes('pro')) score += 45;
+  else if (n.includes('lite')) score += 30;
+  if (n.includes('latest')) score += 25;
+  if (/exp|preview|thinking|image|audio|tts|vision|learnlm|embedding|aqa|gemma/.test(n)) score -= 300;
+  return score;
 }
 
 /* ==================================================== notes parse + slice */
@@ -465,13 +537,18 @@ async function generateReport() {
     const loops = findOpenLoops(slice);
 
     showProgress(true, `Interrogating ${model}…`);
-    const reportMd = await geminiGenerate(model, buildSystemPrompt(), buildUserPrompt(month, slice, themes, loops));
+    const gen = await geminiGenerateSmart(
+      model, buildSystemPrompt(), buildUserPrompt(month, slice, themes, loops),
+      (m, isFallback) => showProgress(true, `${isFallback ? 'Falling back to' : 'Interrogating'} ${m}…`)
+    );
+    const reportMd = gen.text;
+    if (gen.fellBack) toast(`"${model}" unavailable — used "${gen.model}" instead (saved as your model).`, 'ok');
 
     const report = {
       id: `${month}-${Date.now().toString(36)}`,
       month,
       generatedAt: new Date().toISOString(),
-      model,
+      model: gen.model,
       entryCount: slice.length,
       themeSummary: themes.length ? themes.slice(0, 4).map((t) => t.label).join(', ') : 'none detected',
       themes,
@@ -730,7 +807,7 @@ async function refreshModels() {
   const btn = $('#btn-refresh-models');
   btn.disabled = true; const prev = btn.textContent; btn.textContent = '…';
   try {
-    const models = await geminiListModels();
+    const models = (await geminiListModels()).sort((a, b) => rankModel(b) - rankModel(a));
     const sel = $('#set-gemini-model');
     const current = sel.value;
     sel.innerHTML = '';
