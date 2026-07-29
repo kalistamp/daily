@@ -108,14 +108,30 @@ const encPath = (p) => p.split('/').map(encodeURIComponent).join('/');
 
 async function githubFetchNotes() {
   const { repo, notesPath, branch } = cfg();
+  // NOTE: we use the default JSON contents API and decode base64 ourselves,
+  // NOT the `application/vnd.github.raw` media type. The raw media type works in
+  // curl/Node but is unreliable cross-origin in browsers (CORS), which silently
+  // yielded the JSON envelope instead of file text and made every month look
+  // empty. The JSON endpoint is the CORS-safe, browser-supported path.
   const url = `https://api.github.com/repos/${repo}/contents/${encPath(notesPath)}?ref=${encodeURIComponent(branch)}`;
-  const res = await fetch(url, { headers: ghHeaders('application/vnd.github.raw') });
+  const res = await fetch(url, { headers: ghHeaders() });
   if (!res.ok) {
     if (res.status === 404) throw new Error(`Notes file not found: ${repo}/${notesPath}@${branch}. Check the path in Settings.`);
     if (res.status === 401 || res.status === 403) throw new Error(`GitHub auth failed (${res.status}). Token needs Contents:read on ${repo}.`);
     throw new Error(`GitHub notes fetch failed (${res.status}).`);
   }
-  return res.text();
+  const j = await res.json();
+  if (j && j.content && j.encoding === 'base64') return b64DecodeUnicode(j.content);
+  // Files > 1 MB: the contents API omits content. Fall back to the Git Blobs
+  // API (also JSON + base64, so still CORS-safe).
+  if (j && j.sha) {
+    const b = await fetch(`https://api.github.com/repos/${repo}/git/blobs/${j.sha}`, { headers: ghHeaders() });
+    if (b.ok) {
+      const bj = await b.json();
+      if (bj && bj.content && bj.encoding === 'base64') return b64DecodeUnicode(bj.content);
+    }
+  }
+  throw new Error('Could not read notes content from GitHub (unexpected response shape).');
 }
 
 async function gistPull() {
@@ -315,6 +331,13 @@ function b64EncodeUnicode(str) {
   let bin = '';
   bytes.forEach((b) => (bin += String.fromCharCode(b)));
   return btoa(bin);
+}
+// GitHub returns base64 with embedded newlines; strip whitespace, then decode
+// as UTF-8 (atob alone mangles multi-byte chars like em dashes / arrows).
+function b64DecodeUnicode(b64) {
+  const bin = atob((b64 || '').replace(/\s/g, ''));
+  const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
+  return new TextDecoder('utf-8').decode(bytes);
 }
 
 /* ======================================================= markdown → HTML */
