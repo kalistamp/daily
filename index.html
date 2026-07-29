@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<!--
+  ============================================================================
+  Monthly Self-Interrogation Agent
+  ============================================================================
+  PRIVACY MODEL (read this):
+    - This is a PURE client-side app. There is no server. Everything runs in
+      the visitor's browser.
+    - Only the static files in this `docs/` folder are ever public (via GitHub
+      Pages). The parent repository that holds the private daily-journal
+      markdown stays 100% PRIVATE.
+    - All persistent data (generated reports + metadata) is stored in a PRIVATE
+      GitHub Gist as JSON. The Gist stays PRIVATE.
+    - Secrets (GitHub token, Gist ID, Gemini API key, selected model) live
+      EXCLUSIVELY in this browser's localStorage. They are NEVER written into
+      any file in this public `docs/` folder, and never leave the browser
+      except in direct HTTPS calls to api.github.com / generativelanguage.googleapis.com.
+    - Because the repo and Gist are both private, nobody can read any of your
+      data without YOUR own GitHub token + Gist ID entered on YOUR machine.
+  ============================================================================
+-->
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="robots" content="noindex, nofollow" />
+  <title>Monthly Self-Interrogation</title>
+  <link rel="stylesheet" href="style.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#129504;</text></svg>" />
+</head>
+<body>
+
+  <!-- ===================== OPTIONAL PASSWORD GATE ======================= -->
+  <!-- Light over-the-shoulder gate only. NOT real security: secrets already
+       live in this browser's localStorage. Documented as such in the UI. -->
+  <div id="lock-screen" class="lock-screen hidden" aria-hidden="true">
+    <form id="lock-form" class="lock-card">
+      <div class="lock-glyph">&#128274;</div>
+      <h1>Locked</h1>
+      <p class="muted">This workspace is password-gated on this device.</p>
+      <input type="password" id="lock-input" placeholder="Passphrase" autocomplete="current-password" />
+      <button type="submit" class="btn btn-primary btn-block">Unlock</button>
+      <p id="lock-error" class="lock-error hidden">Incorrect passphrase.</p>
+    </form>
+  </div>
+
+  <!-- ============================ APP SHELL ============================= -->
+  <div id="app" class="app">
+
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark">&#129504;</span>
+        <div class="brand-text">
+          <h1>Monthly Self-Interrogation</h1>
+          <p class="brand-sub">private reflection agent &middot; local-only secrets</p>
+        </div>
+      </div>
+
+      <div class="topbar-actions">
+        <div id="sync-status" class="sync-status" title="Cloud sync status">
+          <span class="dot"></span><span class="sync-label">not synced</span>
+        </div>
+        <button id="btn-sync" class="btn btn-ghost" title="Pull &amp; push the private Gist">
+          <span class="ico">&#8635;</span><span class="btn-label">Cloud Sync</span>
+        </button>
+        <button id="btn-theme" class="btn btn-icon" title="Toggle light / dark">&#9681;</button>
+        <button id="btn-settings" class="btn btn-icon" title="Settings">&#9881;</button>
+      </div>
+    </header>
+
+    <div class="layout">
+
+      <!-- ------------------------- SIDEBAR ------------------------------ -->
+      <aside class="sidebar">
+        <div class="card generate-card">
+          <h2 class="card-title">Generate report</h2>
+
+          <label class="field">
+            <span class="field-label">Target month</span>
+            <input type="month" id="target-month" />
+          </label>
+
+          <label class="field">
+            <span class="field-label">Look-back (days before month)</span>
+            <input type="number" id="lookback-days" min="0" max="60" value="14" />
+          </label>
+
+          <button id="btn-generate" class="btn btn-primary btn-block">
+            Generate Monthly Report
+          </button>
+
+          <div id="progress" class="progress hidden">
+            <div class="spinner"></div>
+            <span id="progress-text">Working&hellip;</span>
+          </div>
+        </div>
+
+        <div class="card history-card">
+          <div class="card-head">
+            <h2 class="card-title">History</h2>
+            <span id="history-count" class="badge">0</span>
+          </div>
+          <ul id="history-list" class="history-list">
+            <li class="history-empty muted">No reports yet.</li>
+          </ul>
+        </div>
+
+        <p class="privacy-note muted">
+          Repo &amp; Gist stay <strong>private</strong>. Only these static
+          <code>docs/</code> files are public. Secrets live only in this browser.
+        </p>
+      </aside>
+
+      <!-- --------------------------- MAIN ------------------------------- -->
+      <main class="main">
+
+        <section id="empty-state" class="empty-state">
+          <div class="empty-glyph">&#129504;</div>
+          <h2>No report loaded</h2>
+          <p class="muted">
+            Add your keys in <button class="linkbtn" data-open-settings>Settings</button>,
+            pick a month, then generate. Or open a past report from History.
+          </p>
+          <ul class="checklist" id="setup-checklist">
+            <li data-check="token"><span class="chk"></span> GitHub token</li>
+            <li data-check="gist"><span class="chk"></span> Gist ID</li>
+            <li data-check="gemini"><span class="chk"></span> Gemini API key</li>
+          </ul>
+        </section>
+
+        <section id="report-view" class="report-view hidden">
+          <div class="report-toolbar">
+            <div class="report-meta">
+              <h2 id="report-title">Report</h2>
+              <div class="meta-row">
+                <span class="meta-chip" id="meta-month"></span>
+                <span class="meta-chip" id="meta-model"></span>
+                <span class="meta-chip" id="meta-date"></span>
+              </div>
+              <div class="theme-tags" id="theme-tags"></div>
+            </div>
+            <div class="report-tools">
+              <button id="btn-copy" class="btn btn-ghost" title="Copy markdown">Copy</button>
+              <button id="btn-download" class="btn btn-ghost" title="Download .md">Download</button>
+              <button id="btn-commit" class="btn btn-ghost" title="Commit to private repo">Commit to repo</button>
+              <button id="btn-delete" class="btn btn-danger-ghost" title="Delete this report">Delete</button>
+            </div>
+          </div>
+
+          <article id="report-body" class="report-body markdown"></article>
+
+          <div class="reflection">
+            <div class="card-head">
+              <h3 class="card-title">Your answers &amp; reflections</h3>
+              <span id="reflection-status" class="muted tiny">auto-saves to Gist</span>
+            </div>
+            <textarea id="reflection-input" class="reflection-input"
+              placeholder="write your answers here. lowercase, honest, no audience. auto-saved."></textarea>
+          </div>
+        </section>
+
+      </main>
+    </div>
+  </div>
+
+  <!-- =========================== SETTINGS MODAL ======================== -->
+  <div id="settings-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+    <div class="modal-backdrop" data-close-settings></div>
+    <div class="modal-card">
+      <div class="modal-head">
+        <h2 id="settings-title">Settings</h2>
+        <button class="btn btn-icon" data-close-settings title="Close">&times;</button>
+      </div>
+
+      <div class="modal-body">
+
+        <section class="settings-section">
+          <h3 class="settings-heading">Cloud sync</h3>
+          <p class="settings-help muted">
+            Stored only in this browser (localStorage). Nothing here is ever
+            committed to the public <code>docs/</code> folder.
+          </p>
+
+          <label class="field">
+            <span class="field-label">GitHub token</span>
+            <div class="input-reveal">
+              <input type="password" id="set-github-token" placeholder="github_pat_… or ghp_…" autocomplete="off" spellcheck="false" />
+              <button type="button" class="reveal-btn" data-reveal="set-github-token" title="Show / hide">&#128065;</button>
+            </div>
+            <span class="field-hint">Needs repo + gist scope to read notes and read/write the Gist.</span>
+          </label>
+
+          <label class="field">
+            <span class="field-label">Gist ID</span>
+            <input type="text" id="set-gist-id" placeholder="ead6fb9238714dfc51d0b3fea495e899" autocomplete="off" spellcheck="false" />
+            <span class="field-hint">The private Gist used as your data store.</span>
+          </label>
+
+          <label class="field">
+            <span class="field-label">Gemini API key</span>
+            <div class="input-reveal">
+              <input type="password" id="set-gemini-key" placeholder="AIza…" autocomplete="off" spellcheck="false" />
+              <button type="button" class="reveal-btn" data-reveal="set-gemini-key" title="Show / hide">&#128065;</button>
+            </div>
+            <span class="field-hint">
+              Free key from <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a>. Stored only in this browser.
+            </span>
+          </label>
+
+          <label class="field">
+            <span class="field-label">Gemini model</span>
+            <div class="input-row">
+              <select id="set-gemini-model">
+                <option value="gemini-2.5-flash">gemini-2.5-flash</option>
+                <option value="gemini-2.5-pro">gemini-2.5-pro</option>
+                <option value="gemini-2.5-flash-lite">gemini-2.5-flash-lite</option>
+                <option value="gemini-2.0-flash">gemini-2.0-flash</option>
+              </select>
+              <button type="button" id="btn-refresh-models" class="btn btn-ghost" title="Fetch available models with your key">Refresh</button>
+            </div>
+            <span class="field-hint">Refresh pulls the live model list using your key.</span>
+          </label>
+        </section>
+
+        <section class="settings-section">
+          <h3 class="settings-heading">Source <span class="muted tiny">(advanced)</span></h3>
+          <label class="field">
+            <span class="field-label">Repository (owner/repo)</span>
+            <input type="text" id="set-repo" placeholder="kalistamp/Daily_ng" autocomplete="off" spellcheck="false" />
+          </label>
+          <label class="field">
+            <span class="field-label">Notes file path</span>
+            <input type="text" id="set-notes-path" placeholder="2026/2026daily_pt1.md" autocomplete="off" spellcheck="false" />
+            <span class="field-hint">The private markdown journal to analyze. Entries delimited by <code>### YYYY-MM-DD</code>.</span>
+          </label>
+          <label class="field">
+            <span class="field-label">Branch</span>
+            <input type="text" id="set-branch" placeholder="main" autocomplete="off" spellcheck="false" />
+          </label>
+        </section>
+
+        <section class="settings-section">
+          <h3 class="settings-heading">Device lock <span class="muted tiny">(optional)</span></h3>
+          <p class="settings-help muted">
+            A light passphrase gate for this browser. It is <strong>not</strong>
+            encryption — secrets still live in localStorage. It only stops casual
+            over-the-shoulder access.
+          </p>
+          <label class="field">
+            <span class="field-label">Set / change passphrase</span>
+            <input type="password" id="set-password" placeholder="leave blank to keep current" autocomplete="new-password" />
+          </label>
+          <div class="input-row">
+            <button type="button" id="btn-clear-password" class="btn btn-danger-ghost">Remove passphrase</button>
+          </div>
+        </section>
+
+        <section class="settings-section">
+          <button type="button" id="btn-test" class="btn btn-ghost btn-block">Test connections</button>
+          <div id="test-results" class="test-results"></div>
+        </section>
+      </div>
+
+      <div class="modal-foot">
+        <span id="settings-saved" class="muted tiny">changes auto-save</span>
+        <button class="btn btn-primary" data-close-settings>Done</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Confirm dialog (for destructive actions, avoids native blocking modals). -->
+  <div id="confirm-modal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-backdrop"></div>
+    <div class="modal-card modal-sm">
+      <div class="modal-head"><h2 id="confirm-title">Are you sure?</h2></div>
+      <div class="modal-body"><p id="confirm-text" class="muted"></p></div>
+      <div class="modal-foot">
+        <button id="confirm-cancel" class="btn btn-ghost">Cancel</button>
+        <button id="confirm-ok" class="btn btn-danger">Confirm</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+
+  <script src="script.js"></script>
+</body>
+</html>
