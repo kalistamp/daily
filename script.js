@@ -106,6 +106,65 @@ function ghHeaders(accept = 'application/vnd.github+json') {
 }
 const encPath = (p) => p.split('/').map(encodeURIComponent).join('/');
 
+/* ---------------------------------------------------------------------------
+   REPO WRITE SAFETY  ·  the daily journal is STRICTLY READ-ONLY
+   ---------------------------------------------------------------------------
+   HARD INVARIANT: this app may WRITE repo content to exactly ONE shape of path
+   — `monthly-reports/YYYY-MM.md` — and nothing else. The daily journal
+   (2026/2026daily_pt1.md) and every other repo file are read-only. Every repo
+   write MUST route through githubPutRepoFile(), which calls assertRepoWritable()
+   BEFORE any network request. No code path PUT/PATCH/DELETEs the journal, and
+   the guard resolves `.`/`..` so path traversal can never reach it.
+--------------------------------------------------------------------------- */
+const REPO_WRITE_ALLOW = /^monthly-reports\/\d{4}-\d{2}\.md$/;
+
+// Collapse slashes and resolve "." / ".." so a crafted value can't traverse out
+// of monthly-reports/ into the journal (e.g. "monthly-reports/../2026/…").
+function normalizeRepoPath(p) {
+  const out = [];
+  for (const seg of String(p).replace(/^\/+/, '').split('/')) {
+    if (seg === '' || seg === '.') continue;
+    if (seg === '..') { out.pop(); continue; }
+    out.push(seg);
+  }
+  return out.join('/');
+}
+
+// Throws unless `path` is an allowlisted report file. Also explicitly refuses
+// the journal path as a belt-and-suspenders denylist.
+function assertRepoWritable(path) {
+  const norm = normalizeRepoPath(path);
+  const journal = normalizeRepoPath(cfg().notesPath || DEFAULTS.notesPath);
+  if (norm === journal || norm === normalizeRepoPath(DEFAULTS.notesPath)) {
+    throw new Error(`Blocked: "${norm}" is the read-only journal and must never be written.`);
+  }
+  if (!REPO_WRITE_ALLOW.test(norm)) {
+    throw new Error(`Blocked: repo writes are limited to monthly-reports/YYYY-MM.md (got "${norm}").`);
+  }
+  return norm;
+}
+
+// The ONLY function permitted to write repo content. Guarded before any fetch.
+async function githubPutRepoFile(path, markdown, message) {
+  const safePath = assertRepoWritable(path);
+  const { repo, branch } = cfg();
+  const apiPath = encPath(safePath);
+  let sha;
+  const get = await fetch(`https://api.github.com/repos/${repo}/contents/${apiPath}?ref=${encodeURIComponent(branch)}`, { headers: ghHeaders() });
+  if (get.ok) sha = (await get.json()).sha;
+  const body = { message, content: b64EncodeUnicode(markdown), branch };
+  if (sha) body.sha = sha;
+  const res = await fetch(`https://api.github.com/repos/${repo}/contents/${apiPath}`, {
+    method: 'PUT', headers: ghHeaders(), body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const e = await res.json().catch(() => ({}));
+    throw new Error(e.message || `Commit failed (${res.status}). Token needs Contents:write on ${repo}.`);
+  }
+  return (await res.json()).content?.html_url;
+}
+
+// READ-ONLY: issues only GET requests against the journal. Never writes it.
 async function githubFetchNotes() {
   const { repo, notesPath, branch } = cfg();
   // NOTE: we use the default JSON contents API and decode base64 ourselves,
@@ -170,27 +229,18 @@ async function gistPushNow() {
   localStorage.setItem(LS.gistCache, JSON.stringify(state.data));
 }
 
+// Commits a generated report to monthly-reports/YYYY-MM.md ONLY. `month` is
+// strictly validated, then the write is funneled through the guarded choke
+// point (githubPutRepoFile) so it can never target the journal.
 async function githubCommitReport(month, markdown) {
-  const { repo, branch } = cfg();
-  const path = `monthly-reports/${month}.md`;
-  const apiPath = encPath(path);
-  let sha;
-  const get = await fetch(`https://api.github.com/repos/${repo}/contents/${apiPath}?ref=${encodeURIComponent(branch)}`, { headers: ghHeaders() });
-  if (get.ok) sha = (await get.json()).sha;
-  const body = {
-    message: `Add monthly self-interrogation report ${month}`,
-    content: b64EncodeUnicode(markdown),
-    branch,
-  };
-  if (sha) body.sha = sha;
-  const res = await fetch(`https://api.github.com/repos/${repo}/contents/${apiPath}`, {
-    method: 'PUT', headers: ghHeaders(), body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const e = await res.json().catch(() => ({}));
-    throw new Error(e.message || `Commit failed (${res.status}). Token needs Contents:write on ${repo}.`);
+  if (!/^\d{4}-\d{2}$/.test(String(month))) {
+    throw new Error(`Invalid report month "${month}" — expected YYYY-MM.`);
   }
-  return (await res.json()).content?.html_url;
+  return githubPutRepoFile(
+    `monthly-reports/${month}.md`,
+    markdown,
+    `Add monthly self-interrogation report ${month}`
+  );
 }
 
 /* ================================================================= Gemini */
