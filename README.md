@@ -59,6 +59,27 @@ Hit **Test connections** to verify all four before generating.
 5. Optionally **Commit to repo** writes it to `monthly-reports/YYYY-MM.md`.
 6. Answer the questions in the **reflection** box — auto-saved to the Gist.
 
+## The daily journal is strictly read-only
+
+The app **only ever reads** `2026/2026daily_pt1.md` (via `GET`). It is never
+written, modified, or deleted. Enforced in `script.js`:
+
+- Repo writes go through **one** function, `githubPutRepoFile()`, which calls
+  `assertRepoWritable()` **before any network request**.
+- That guard allows writes to exactly one path shape — `monthly-reports/YYYY-MM.md`
+  — and refuses everything else, including the journal. It resolves `.`/`..`
+  first, so path traversal can't reach the journal, and it also denylists the
+  journal path explicitly.
+- The only repo-write feature is the optional **Commit to repo** button
+  (reports → `monthly-reports/`). There is no code path that writes the journal.
+
+**Strongest guarantee (recommended):** if you don't need the *Commit to repo*
+button, issue your token with **Contents: Read-only** (+ Gists: Read/Write).
+Then GitHub itself rejects any write to *any* repo file — the journal can't be
+touched even by a bug or a compromised page. If you *do* want that button,
+Contents: Read/Write is required (fine-grained PATs can't scope to a subpath),
+and the in-app guard above is what protects the journal.
+
 ## Optional device lock
 
 Settings → **Device lock** sets a passphrase gate for this browser. It is a
