@@ -31,24 +31,28 @@ Open **Settings (⚙)** and fill in:
     writes to the repo, so no write access is needed or wanted.
   - **Gists: Read and write** (to store reports in the private Gist).
 - **Gist ID** — pre-filled with `ead6fb9238714dfc51d0b3fea495e899`.
-- **Provider** — choose which model writes the report: **OpenAI** (the default),
-  **Anthropic (Claude)**, or **Gemini**.
-- **API key** — enter a separate key for each provider you want to use:
+- **Provider** — choose which service writes the report: **OpenAI** (the
+  default), **Anthropic (Claude)**, or **Gemini**. Only **one API-key field is
+  shown at a time** — the one for the selected provider. Each provider keeps its
+  own key, so switching never loses the others.
+- **API key** — enter a key for the selected provider:
   - **OpenAI** — <https://platform.openai.com/api-keys>
   - **Anthropic** — <https://console.anthropic.com/settings/keys>
   - **Gemini** — free from <https://aistudio.google.com/apikey>
   Only the selected provider's key is used to generate a report; keys stay in
-  this browser and are never committed.
-- **Model** — the dropdown lists models for the selected provider (default
-  `gpt-4o` for OpenAI). Hit **Refresh** to pull the live list with that
-  provider's key. Gemini additionally auto-falls back to an available model if
-  the chosen one is unavailable.
+  this browser and are **never** committed or synced to the Gist.
+- **Model** — defaults to **Auto**, which uses the newest chat model your key
+  can access, resolved live each time you run a report (so it never goes stale).
+  Hit **Refresh** to load the live list and pin a specific model, or pick
+  **Custom…** to type an exact model id. The list is discovered from the
+  provider — with no key entered you'll only see **Auto** and **Custom**.
 
 Under **Source (advanced)** the repo (`kalistamp/Daily_ng`), notes path
 (`2026/2026daily_pt1.md`), and branch (`main`) are pre-filled — change the notes
 path each year as your journal file changes.
 
-Hit **Test connections** to verify all four before generating.
+Hit **Test connections** to verify GitHub, the Gist, the notes file, and the
+selected provider's key before generating.
 
 ## How it works
 
