@@ -18,54 +18,84 @@
 
 /* -------------------------------------------------------------- constants */
 const GIST_FILE = 'monthly-reports.json';
+// One localStorage key per provider per field, so switching the active provider
+// never loses the other providers' keys. API keys are DEVICE-LOCAL ONLY and are
+// never written into state.data / the Gist (see gistPushNow).
 const LS = {
-  githubToken:  'msi.githubToken',
-  gistId:       'msi.gistId',
-  provider:     'msi.provider',
-  openaiKey:    'msi.openaiKey',
-  openaiModel:  'msi.openaiModel',
-  anthropicKey: 'msi.anthropicKey',
+  githubToken:    'msi.githubToken',
+  gistId:         'msi.gistId',
+  activeProvider: 'msi.activeProvider',
+  openaiKey:      'msi.openaiKey',
+  openaiModel:    'msi.openaiModel',
+  anthropicKey:   'msi.anthropicKey',
   anthropicModel: 'msi.anthropicModel',
-  geminiKey:    'msi.geminiKey',
-  geminiModel:  'msi.geminiModel',
-  repo:         'msi.repo',
-  notesPath:    'msi.notesPath',
-  branch:       'msi.branch',
-  theme:        'msi.theme',
-  passHash:     'msi.passHash',
-  gistCache:    'msi.gistCache',
-  lastId:       'msi.lastId',
+  geminiKey:      'msi.geminiKey',
+  geminiModel:    'msi.geminiModel',
+  repo:           'msi.repo',
+  notesPath:      'msi.notesPath',
+  branch:         'msi.branch',
+  theme:          'msi.theme',
+  passHash:       'msi.passHash',
+  gistCache:      'msi.gistCache',
+  lastId:         'msi.lastId',
 };
 // Gist ID pre-filled from the private gist provided by the user.
+// NOTE on the *Model defaults: blank means "Auto" — resolved against the live
+// discovery list at request time, never frozen into storage. Writing a
+// hardcoded "latest model" here would go stale the moment a vendor ships
+// something new, and would silently pin the user forever.
 const DEFAULTS = {
-  githubToken:  '',
-  gistId:       'ead6fb9238714dfc51d0b3fea495e899',
-  provider:     'openai',            // default summarization provider (was gemini)
-  openaiKey:    '',
-  openaiModel:  'gpt-4o',
-  anthropicKey: '',
-  anthropicModel: 'claude-opus-5',
-  geminiKey:    '',
-  geminiModel:  'gemini-flash-latest',
-  repo:         'kalistamp/Daily_ng',
-  notesPath:    '2026/2026daily_pt1.md',
-  branch:       'main',
+  githubToken:    '',
+  gistId:         'ead6fb9238714dfc51d0b3fea495e899',
+  activeProvider: 'openai',   // default summarization provider (was gemini)
+  openaiKey:      '',
+  openaiModel:    '',         // blank = Auto
+  anthropicKey:   '',
+  anthropicModel: '',         // blank = Auto
+  geminiKey:      '',
+  geminiModel:    '',         // blank = Auto
+  repo:           'kalistamp/Daily_ng',
+  notesPath:      '2026/2026daily_pt1.md',
+  branch:         'main',
 };
 
-// Summarization providers. Each has its own API key + model, stored separately
-// in localStorage so the user can keep a distinct key per provider and switch
-// between them freely. `keyInput` maps to the settings <input> id.
-const PROVIDERS = {
-  openai:    { label: 'OpenAI',    keyCfg: 'openaiKey',    modelCfg: 'openaiModel',    keyInput: 'set-openai-key' },
-  anthropic: { label: 'Anthropic', keyCfg: 'anthropicKey', modelCfg: 'anthropicModel', keyInput: 'set-anthropic-key' },
-  gemini:    { label: 'Gemini',    keyCfg: 'geminiKey',    modelCfg: 'geminiModel',    keyInput: 'set-gemini-key' },
-};
-// Static starting options per provider (the Refresh button pulls the live list).
-const PROVIDER_MODELS = {
-  openai:    ['gpt-4o', 'gpt-4o-mini', 'gpt-4.1', 'gpt-4.1-mini'],
-  anthropic: ['claude-opus-5', 'claude-sonnet-5', 'claude-haiku-4-5'],
-  gemini:    ['gemini-flash-latest', 'gemini-pro-latest', 'gemini-flash-lite-latest', 'gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.0-flash'],
-};
+/* ------------------------------------------------- model filter + ranking */
+// DENY-list, not an allow-list: an allow-list keyed to today's naming
+// conventions (/^gpt-|^o\d/) silently hides any model released under an
+// unfamiliar name, which defeats the point of live discovery. Tokens are
+// matched as whole segments — a bare substring test would hide "adaptive"
+// because of "ada", or "editorial" because of "edit".
+const NON_CHAT_TOKENS = [
+  'embed', 'embedding', 'embeddings', 'gecko',
+  'tts', 'stt', 'whisper', 'audio', 'speech', 'voice', 'transcribe', 'translate',
+  'image', 'images', 'vision', 'dall', 'dalle', 'imagen', 'veo',
+  'moderation', 'moderations', 'guard', 'safety',
+  'realtime', 'search', 'rerank', 'similarity',
+  'edit', 'edits', 'instruct', 'codex',
+  'ada', 'babbage', 'curie', 'davinci',
+  'aqa', 'gemma', 'learnlm',
+];
+const NON_CHAT_RE = new RegExp(`(^|[-_./])(${NON_CHAT_TOKENS.join('|')})([-_./]|$)`, 'i');
+const isChatModel = (id) => !!id && !NON_CHAT_RE.test(id);
+
+// Discovery results are cached per API KEY (not per session) so reopening
+// Settings doesn't re-hit the network; the Refresh button forces a re-fetch.
+const DISCOVERY_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+// Non-reversible fingerprint, used only to scope the cache entry to one key.
+function keyFingerprint(key) {
+  let h = 5381;
+  for (let i = 0; i < key.length; i++) h = (((h << 5) + h) + key.charCodeAt(i)) | 0;
+  return (h >>> 0).toString(36);
+}
+const discoveryCacheKey = (provider, key) => `msi.models.${provider}.${keyFingerprint(key)}`;
+
+/* -------------------------------------------------------- error helper */
+function apiError(message, status, detail) {
+  const e = new Error(detail ? `${message} ${detail}` : message);
+  e.status = status;
+  e.detail = detail || '';
+  return e;
+}
 
 // Light local theme buckets. Substring counting — intentionally rough; the
 // selected Gemini model does the real analysis. Keeps everything client-side.
@@ -115,12 +145,14 @@ function cfg() { return state.cfg; }
 
 /* ----------------------------------------------------------- providers */
 function activeProvider() {
-  const p = cfg().provider;
+  const p = cfg().activeProvider;
   return PROVIDERS[p] ? p : 'openai';
 }
 function providerLabel(p) { return (PROVIDERS[p] && PROVIDERS[p].label) || p; }
-function providerKey(p = activeProvider())   { return cfg()[PROVIDERS[p].keyCfg]; }
-function providerModel(p = activeProvider()) { return cfg()[PROVIDERS[p].modelCfg] || PROVIDER_MODELS[p][0]; }
+function providerKey(p = activeProvider()) { return (cfg()[PROVIDERS[p].keyCfg] || '').trim(); }
+// The user's stored choice. Blank = Auto — deliberately NOT substituted with a
+// default here; Auto is resolved live in resolveModel().
+function pinnedModel(p = activeProvider()) { return (cfg()[PROVIDERS[p].modelCfg] || '').trim(); }
 
 function missingSecrets() {
   const c = cfg();
@@ -217,90 +249,300 @@ async function gistPushNow() {
   localStorage.setItem(LS.gistCache, JSON.stringify(state.data));
 }
 
-/* ================================================================= Gemini */
-async function geminiGenerate(model, systemText, userText) {
-  const key = cfg().geminiKey;
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`;
-  const body = {
-    systemInstruction: { parts: [{ text: systemText }] },
-    contents: [{ role: 'user', parts: [{ text: userText }] }],
-    generationConfig: { temperature: 0.85, topP: 0.95, maxOutputTokens: 4096 },
-  };
-  const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const err = new Error(data?.error?.message || `Gemini request failed (${res.status}).`);
-    err.status = res.status;
-    err.gstatus = data?.error?.status;
-    throw err;
-  }
-  const cand = data?.candidates?.[0];
-  const text = (cand?.content?.parts || []).map((p) => p.text || '').join('').trim();
-  if (!text) {
-    const reason = cand?.finishReason || data?.promptFeedback?.blockReason || 'empty response';
-    throw new Error(`Gemini returned no text (${reason}).`);
-  }
-  return text;
-}
+/* ============================================================== providers */
+/* ----------------------------------------------------------------------------
+   PROVIDER REGISTRY
+   ----------------------------------------------------------------------------
+   One shared summarization path; a thin per-vendor adapter that only knows that
+   vendor's wire format. Each entry implements the same interface:
 
-async function geminiListModels() {
-  const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(cfg().geminiKey)}`);
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data?.error?.message || `Model list failed (${res.status}).`);
-  return (data.models || [])
-    .filter((m) => (m.supportedGenerationMethods || []).includes('generateContent'))
-    .map((m) => m.name.replace(/^models\//, ''))
-    .filter((n) => /gemini/i.test(n));
-}
+     id, label, base, defaultModel, fallbacks, keyUrl
+     buildBody(model, systemText, userText[, mode])  -> request JSON
+     parse(json[, mode])                             -> { text }
+     send(model, systemText, userText, key, onModel) -> { text, model, fellBack }
+     discover(key)                                   -> [{ id, created }]
+     rankKey(m)                                      -> sort key, higher = newer
 
-// Ordered fallback. Try the preferred model first (fast path). If it's
-// unavailable/deprecated, discover the models THIS key can actually use
-// (listModels only returns usable ones), rank them, and try each until one
-// works — then remember the winner so later runs start there.
-async function geminiGenerateSmart(preferred, systemText, userText, onModel) {
-  const tried = new Set();
-  const staticFallbacks = [
-    'gemini-flash-latest', 'gemini-2.5-flash', 'gemini-2.0-flash',
-    'gemini-pro-latest', 'gemini-2.5-pro', 'gemini-flash-lite-latest', 'gemini-2.0-flash-lite',
-  ];
-  let queue = [preferred, ...staticFallbacks].filter(Boolean);
-  let liveLoaded = false;
-  let lastErr = null;
+   The conversation members from the reference design (newConvo / pushUser /
+   pushAssistant / pushToolResults) and the tool-schema converter are omitted on
+   purpose: this app makes a single-shot summarization call and declares no
+   tools, so there is no multi-turn tool loop to carry state for.
+--------------------------------------------------------------------------- */
 
-  for (let i = 0; i < queue.length; i++) {
-    const model = queue[i];
-    if (!model || tried.has(model)) continue;
-    tried.add(model);
-    if (onModel) onModel(model, tried.size > 1);
-    try {
-      const text = await geminiGenerate(model, systemText, userText);
-      rememberModel(model);
-      return { text, model, fellBack: model !== preferred };
-    } catch (e) {
-      lastErr = e;
-      // Only walk the fallback chain for "this model isn't available" errors.
-      // Auth / quota / safety / network errors stop immediately.
-      if (!isModelAvailabilityError(e)) throw e;
-      if (!liveLoaded) {
-        liveLoaded = true;
-        let live = [];
-        try { live = (await geminiListModels()).sort((a, b) => rankModel(b) - rankModel(a)); } catch (_) { /* keep static queue */ }
-        if (live.length) queue = queue.slice(0, i + 1).concat(live.filter((m) => !tried.has(m)));
+const PROVIDERS = {
+  /* --------------------------------------------------------------- OpenAI */
+  openai: {
+    id: 'openai',
+    label: 'OpenAI',
+    base: 'https://api.openai.com/v1',
+    defaultModel: '',                       // blank = Auto
+    fallbacks: ['gpt-4o', 'gpt-4o-mini', 'gpt-4.1'],
+    keyUrl: 'https://platform.openai.com/api-keys',
+    keyCfg: 'openaiKey', modelCfg: 'openaiModel', keyInput: 'set-openai-key',
+
+    // Which endpoint a given model needs is not knowable from its id, so it is
+    // learned once by probing and then cached per model.
+    modeCache() { try { return JSON.parse(localStorage.getItem('msi.openaiMode') || '{}'); } catch { return {}; } },
+    setMode(model, mode) {
+      const c = this.modeCache();
+      if (c[model] === mode) return;
+      c[model] = mode;
+      try { localStorage.setItem('msi.openaiMode', JSON.stringify(c)); } catch { /* quota */ }
+    },
+
+    buildBody(model, systemText, userText, mode) {
+      if (mode === 'responses') {
+        // /v1/responses uses `instructions` + `input` (not a messages array).
+        // store:false keeps the conversation off OpenAI's servers, matching the
+        // rest of this app's privacy model.
+        return { model, instructions: systemText, input: userText, store: false };
       }
-    }
-  }
-  throw new Error(`No available Gemini model worked (tried ${tried.size}). Last error: ${lastErr ? lastErr.message : 'unknown'}`);
-}
+      // /v1/chat/completions. Deliberately NO temperature and NO max_tokens:
+      // newer models reject a non-default temperature, and max_tokens was
+      // renamed max_completion_tokens — omitting both works everywhere.
+      return {
+        model,
+        messages: [
+          { role: 'system', content: systemText },
+          { role: 'user', content: userText },
+        ],
+      };
+    },
 
-function rememberModel(model, provider = activeProvider()) {
-  const modelCfg = PROVIDERS[provider].modelCfg;
-  if (model === cfg()[modelCfg]) return;
-  setCfg(modelCfg, model);
-  if (provider !== activeProvider()) return;
-  ensureModelOption(model);
-  const sel = $('#set-model');
-  if (sel) sel.value = model;
-}
+    parse(json, mode) {
+      if (mode === 'responses') {
+        if (typeof json?.output_text === 'string' && json.output_text.trim()) {
+          return { text: json.output_text.trim() };
+        }
+        // output[] interleaves reasoning items with the message; keep the text.
+        const text = (json?.output || [])
+          .filter((o) => o && o.type === 'message')
+          .flatMap((o) => o.content || [])
+          .filter((c) => c && c.type === 'output_text')
+          .map((c) => c.text || '')
+          .join('')
+          .trim();
+        return { text };
+      }
+      return { text: (json?.choices?.[0]?.message?.content || '').trim() };
+    },
+
+    // chat -> responses when the model won't take the chat shape (reasoning
+    // models); responses -> chat when the model isn't served there. Auth and
+    // quota failures are not mode problems, so they stop immediately.
+    nextMode(mode, status, detail) {
+      const d = (detail || '').toLowerCase();
+      if (mode === 'chat') {
+        const needsResponses = status === 404
+          || (status === 400 && /reasoning|\/v1\/responses|responses api|not supported|unsupported/.test(d));
+        return needsResponses ? 'responses' : null;
+      }
+      if (mode === 'responses' && (status === 404 || status === 400)) return 'chat';
+      return null;
+    },
+
+    async send(model, systemText, userText, key) {
+      let mode = this.modeCache()[model] || 'chat';
+      const tried = new Set();
+      let lastErr = null;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        if (tried.has(mode)) break;
+        tried.add(mode);
+        const url = `${this.base}${mode === 'responses' ? '/responses' : '/chat/completions'}`;
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+          body: JSON.stringify(this.buildBody(model, systemText, userText, mode)),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok) {
+          this.setMode(model, mode);
+          const { text } = this.parse(data, mode);
+          if (!text) {
+            throw new Error(`OpenAI returned no text (${data?.choices?.[0]?.finish_reason || data?.status || 'empty response'}).`);
+          }
+          return { text, model, fellBack: false };
+        }
+        const detail = [data?.error?.message, data?.error?.param, data?.error?.code].filter(Boolean).join(' ');
+        lastErr = apiError(`OpenAI request failed (${res.status}).`, res.status, data?.error?.message);
+        const next = this.nextMode(mode, res.status, detail);
+        if (!next) throw lastErr;
+        mode = next;
+      }
+      throw lastErr || new Error('OpenAI request failed.');
+    },
+
+    async discover(key) {
+      const res = await fetch(`${this.base}/models`, { headers: { Authorization: `Bearer ${key}` } });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw apiError(`OpenAI model list failed (${res.status}).`, res.status, data?.error?.message);
+      // `created` is seconds since epoch.
+      return (data.data || []).map((m) => ({ id: m.id, created: (m.created || 0) * 1000 }));
+    },
+    rankKey(m) { return m.created || 0; },
+  },
+
+  /* ------------------------------------------------------------ Anthropic */
+  anthropic: {
+    id: 'anthropic',
+    label: 'Anthropic (Claude)',
+    base: 'https://api.anthropic.com/v1',
+    defaultModel: '',
+    fallbacks: ['claude-opus-5', 'claude-sonnet-5', 'claude-haiku-4-5'],
+    keyUrl: 'https://console.anthropic.com/settings/keys',
+    keyCfg: 'anthropicKey', modelCfg: 'anthropicModel', keyInput: 'set-anthropic-key',
+
+    headers(key) {
+      return {
+        'Content-Type': 'application/json',
+        'x-api-key': key,
+        'anthropic-version': '2023-06-01',
+        // Required for browser calls — without it the request is blocked by
+        // CORS before it ever leaves the tab.
+        'anthropic-dangerous-direct-browser-access': 'true',
+      };
+    },
+
+    buildBody(model, systemText, userText) {
+      // max_tokens is required by /v1/messages, and `system` is a top-level
+      // string rather than a message.
+      return {
+        model,
+        max_tokens: 8192,
+        system: systemText,
+        messages: [{ role: 'user', content: userText }],
+      };
+    },
+
+    parse(json) {
+      const text = (json?.content || [])
+        .filter((b) => b && b.type === 'text')
+        .map((b) => b.text || '')
+        .join('')
+        .trim();
+      return { text };
+    },
+
+    async send(model, systemText, userText, key) {
+      const res = await fetch(`${this.base}/messages`, {
+        method: 'POST',
+        headers: this.headers(key),
+        body: JSON.stringify(this.buildBody(model, systemText, userText)),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw apiError(`Anthropic request failed (${res.status}).`, res.status, data?.error?.message);
+      if (data?.stop_reason === 'refusal') throw new Error('Anthropic declined this request (refusal).');
+      const { text } = this.parse(data);
+      if (!text) throw new Error(`Anthropic returned no text (${data?.stop_reason || 'empty response'}).`);
+      return { text, model, fellBack: false };
+    },
+
+    async discover(key) {
+      const res = await fetch(`${this.base}/models?limit=100`, { headers: this.headers(key) });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw apiError(`Anthropic model list failed (${res.status}).`, res.status, data?.error?.message);
+      return (data.data || []).map((m) => ({ id: m.id, created: Date.parse(m.created_at) || 0 }));
+    },
+    rankKey(m) { return m.created || 0; },
+  },
+
+  /* --------------------------------------------------------------- Gemini */
+  gemini: {
+    id: 'gemini',
+    label: 'Gemini',
+    base: 'https://generativelanguage.googleapis.com/v1beta',
+    defaultModel: '',
+    fallbacks: [
+      'gemini-flash-latest', 'gemini-2.5-flash', 'gemini-2.0-flash',
+      'gemini-pro-latest', 'gemini-2.5-pro', 'gemini-flash-lite-latest',
+    ],
+    keyUrl: 'https://aistudio.google.com/apikey',
+    keyCfg: 'geminiKey', modelCfg: 'geminiModel', keyInput: 'set-gemini-key',
+
+    buildBody(model, systemText, userText) {
+      return {
+        systemInstruction: { parts: [{ text: systemText }] },
+        contents: [{ role: 'user', parts: [{ text: userText }] }],
+        generationConfig: { temperature: 0.85, topP: 0.95, maxOutputTokens: 8192 },
+      };
+    },
+
+    parse(json) {
+      const cand = json?.candidates?.[0];
+      const text = (cand?.content?.parts || []).map((p) => p.text || '').join('').trim();
+      return { text, finishReason: cand?.finishReason || json?.promptFeedback?.blockReason };
+    },
+
+    // Single attempt against one model.
+    async once(model, systemText, userText, key) {
+      // Gemini authenticates with the key as a query param.
+      const url = `${this.base}/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`;
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(this.buildBody(model, systemText, userText)),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const err = apiError(`Gemini request failed (${res.status}).`, res.status, data?.error?.message);
+        err.gstatus = data?.error?.status;
+        throw err;
+      }
+      const { text, finishReason } = this.parse(data);
+      if (!text) throw new Error(`Gemini returned no text (${finishReason || 'empty response'}).`);
+      return text;
+    },
+
+    // Ordered fallback: Gemini's model names churn, so if the preferred model
+    // is gone, discover what this key can actually use and try those in turn.
+    async send(preferred, systemText, userText, key, onModel) {
+      const tried = new Set();
+      let queue = [preferred, ...this.fallbacks].filter(Boolean);
+      let liveLoaded = false;
+      let lastErr = null;
+
+      for (let i = 0; i < queue.length; i++) {
+        const model = queue[i];
+        if (!model || tried.has(model)) continue;
+        tried.add(model);
+        if (onModel) onModel(model, tried.size > 1);
+        try {
+          const text = await this.once(model, systemText, userText, key);
+          return { text, model, fellBack: model !== preferred };
+        } catch (e) {
+          lastErr = e;
+          // Only walk the chain for "this model isn't available" errors.
+          // Auth / quota / safety / network errors stop immediately.
+          if (!isModelAvailabilityError(e)) throw e;
+          if (!liveLoaded) {
+            liveLoaded = true;
+            let live = [];
+            try {
+              live = (await this.discover(key))
+                .filter((m) => isChatModel(m.id))
+                .sort((a, b) => this.rankKey(b) - this.rankKey(a))
+                .map((m) => m.id);
+            } catch (_) { /* keep the static queue */ }
+            if (live.length) queue = queue.slice(0, i + 1).concat(live.filter((m) => !tried.has(m)));
+          }
+        }
+      }
+      throw new Error(`No available Gemini model worked (tried ${tried.size}). Last error: ${lastErr ? lastErr.message : 'unknown'}`);
+    },
+
+    async discover(key) {
+      const res = await fetch(`${this.base}/models?key=${encodeURIComponent(key)}`);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw apiError(`Gemini model list failed (${res.status}).`, res.status, data?.error?.message);
+      return (data.models || [])
+        .filter((m) => (m.supportedGenerationMethods || []).includes('generateContent'))
+        .map((m) => ({ id: (m.name || '').replace(/^models\//, ''), created: 0 }));
+    },
+    // Gemini's list endpoint exposes no created/timestamp field, so this is the
+    // one provider where ranking has to fall back to a name heuristic.
+    rankKey(m) { return geminiNameRank(m.id); },
+  },
+};
 
 function isModelAvailabilityError(e) {
   if (e && e.status === 404) return true;
@@ -308,8 +550,9 @@ function isModelAvailabilityError(e) {
   return /no longer available|not found|does not exist|is not supported|not supported for|unavailable|deprecated|call listmodels|unknown name|invalid model|not a valid/.test(m);
 }
 
-// Higher = preferred. Newer version > flash > pro > lite; penalize special/experimental variants.
-function rankModel(name) {
+// Higher = preferred. Newer version > flash > pro > lite; penalise variants
+// that aren't general-purpose chat.
+function geminiNameRank(name) {
   const n = (name || '').toLowerCase();
   let score = 0;
   const v = n.match(/(\d+)\.(\d+)/);
@@ -318,114 +561,53 @@ function rankModel(name) {
   else if (n.includes('pro')) score += 45;
   else if (n.includes('lite')) score += 30;
   if (n.includes('latest')) score += 25;
-  if (/exp|preview|thinking|image|audio|tts|vision|learnlm|embedding|aqa|gemma/.test(n)) score -= 300;
+  if (/exp|preview|thinking/.test(n)) score -= 300;
   return score;
 }
 
-/* ================================================================= OpenAI */
-// Chat Completions endpoint. OpenAI serves permissive CORS for API-key calls,
-// so a direct browser fetch works (same client-side model as Gemini). We send
-// only model + messages — omitting temperature / token caps keeps the request
-// compatible across the whole model zoo (reasoning models reject custom
-// temperature and use max_completion_tokens instead of max_tokens).
-async function openaiGenerate(model, systemText, userText) {
-  const res = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${providerKey('openai')}` },
-    body: JSON.stringify({
-      model,
-      messages: [
-        { role: 'system', content: systemText },
-        { role: 'user', content: userText },
-      ],
-    }),
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const err = new Error(data?.error?.message || `OpenAI request failed (${res.status}).`);
-    err.status = res.status;
-    throw err;
+/* ------------------------------------------------- discovery + Auto mode */
+// Returns chat-capable models for a provider, newest first. Cached per key.
+async function discoverModels(provider, key, { force = false } = {}) {
+  const p = PROVIDERS[provider];
+  if (!key) throw new Error(`Add your ${p.label} API key first.`);
+  const cacheKey = discoveryCacheKey(provider, key);
+  if (!force) {
+    try {
+      const raw = localStorage.getItem(cacheKey);
+      if (raw) {
+        const hit = JSON.parse(raw);
+        if (hit && Array.isArray(hit.models) && (Date.now() - (hit.at || 0)) < DISCOVERY_TTL_MS) {
+          return hit.models;
+        }
+      }
+    } catch { /* ignore a corrupt cache entry */ }
   }
-  const text = (data?.choices?.[0]?.message?.content || '').trim();
-  if (!text) throw new Error(`OpenAI returned no text (${data?.choices?.[0]?.finish_reason || 'empty response'}).`);
-  return text;
+  const models = (await p.discover(key))
+    .filter((m) => isChatModel(m.id))
+    .sort((a, b) => p.rankKey(b) - p.rankKey(a));
+  try { localStorage.setItem(cacheKey, JSON.stringify({ at: Date.now(), models })); } catch { /* quota */ }
+  return models;
 }
 
-async function openaiListModels() {
-  const res = await fetch('https://api.openai.com/v1/models', {
-    headers: { Authorization: `Bearer ${providerKey('openai')}` },
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data?.error?.message || `Model list failed (${res.status}).`);
-  return (data.data || [])
-    .map((m) => m.id)
-    .filter((id) => /^(gpt-|o[0-9]|chatgpt)/i.test(id))
-    .filter((id) => !/embedding|whisper|audio|tts|realtime|image|dall|moderation|transcribe|search|instruct/i.test(id))
-    .sort();
+// Resolve the model to actually call. A pinned choice always wins; Auto is
+// resolved against the live list at request time so it never goes stale.
+async function resolveModel(provider, onProgress) {
+  const p = PROVIDERS[provider];
+  const pinned = pinnedModel(provider);
+  if (pinned) return { model: pinned, auto: false };
+  try {
+    if (onProgress) onProgress('Selecting newest model…');
+    const models = await discoverModels(provider, providerKey(provider));
+    if (models.length) return { model: models[0].id, auto: true };
+  } catch (_) { /* fall through to the static chain */ }
+  return { model: p.fallbacks[0], auto: true, usedFallbackList: true };
 }
 
-/* ============================================================== Anthropic */
-// Messages endpoint. Anthropic blocks browser CORS unless the request carries
-// `anthropic-dangerous-direct-browser-access: true`; the API version header is
-// also required. Response text lives in content[] blocks of type "text".
-function anthropicHeaders() {
-  return {
-    'Content-Type': 'application/json',
-    'x-api-key': providerKey('anthropic'),
-    'anthropic-version': '2023-06-01',
-    'anthropic-dangerous-direct-browser-access': 'true',
-  };
-}
-async function anthropicGenerate(model, systemText, userText) {
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: anthropicHeaders(),
-    body: JSON.stringify({
-      model,
-      max_tokens: 8192,          // room for the multi-section report (+ any model thinking)
-      system: systemText,
-      messages: [{ role: 'user', content: userText }],
-    }),
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const err = new Error(data?.error?.message || `Anthropic request failed (${res.status}).`);
-    err.status = res.status;
-    throw err;
-  }
-  if (data?.stop_reason === 'refusal') throw new Error('Anthropic declined this request (refusal).');
-  const text = (data?.content || [])
-    .filter((b) => b && b.type === 'text')
-    .map((b) => b.text || '')
-    .join('')
-    .trim();
-  if (!text) throw new Error(`Anthropic returned no text (${data?.stop_reason || 'empty response'}).`);
-  return text;
-}
-
-async function anthropicListModels() {
-  const res = await fetch('https://api.anthropic.com/v1/models', { headers: anthropicHeaders() });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data?.error?.message || `Model list failed (${res.status}).`);
-  return (data.data || []).map((m) => m.id).filter((id) => /^claude/i.test(id));
-}
-
-/* ====================================================== provider dispatch */
-// Returns { text, model, fellBack }. Gemini keeps its ordered-fallback logic
-// (its model names churn); OpenAI/Anthropic use a single call with clear errors.
-async function providerGenerate(provider, model, systemText, userText, onModel) {
-  if (provider === 'gemini') return geminiGenerateSmart(model, systemText, userText, onModel);
-  if (onModel) onModel(model, false);
-  const text = provider === 'openai'
-    ? await openaiGenerate(model, systemText, userText)
-    : await anthropicGenerate(model, systemText, userText);
-  return { text, model, fellBack: false };
-}
-
-async function listModelsForProvider(provider) {
-  if (provider === 'gemini')    return geminiListModels();
-  if (provider === 'openai')    return openaiListModels();
-  return anthropicListModels();
+/* ------------------------------------------------------ shared entry points */
+// Returns { text, model, fellBack }.
+function providerGenerate(provider, model, systemText, userText, onModel) {
+  const p = PROVIDERS[provider];
+  return p.send(model, systemText, userText, providerKey(provider), onModel);
 }
 
 /* ==================================================== notes parse + slice */
@@ -648,7 +830,6 @@ async function generateReport() {
   const month = $('#target-month').value || prevMonthStr();
   const lookback = clampInt($('#lookback-days').value, 0, 60, 14);
   const provider = activeProvider();
-  const model = providerModel(provider);
   const btn = $('#btn-generate');
   btn.disabled = true;
   showProgress(true, 'Fetching journal…');
@@ -668,23 +849,30 @@ async function generateReport() {
     const rangeStart = slice[0].date;
     const rangeEnd = slice[slice.length - 1].date;
 
+    // Auto (blank) resolves against the live model list here, per request —
+    // never frozen into storage.
+    const picked = await resolveModel(provider, (t) => showProgress(true, t));
+    const model = picked.model;
+
     showProgress(true, `Interrogating ${model}…`);
     const gen = await providerGenerate(
       provider, model, buildSystemPrompt(), buildUserPrompt(month, slice, themes, loops),
       (m, isFallback) => showProgress(true, `${isFallback ? 'Falling back to' : 'Interrogating'} ${m}…`)
     );
     const reportMd = gen.text;
-    if (gen.fellBack) toast(`"${model}" unavailable — used "${gen.model}" instead (saved as your model).`, 'ok');
+    if (gen.fellBack) toast(`"${model}" unavailable — used "${gen.model}" instead.`, 'ok');
 
     const report = {
       id: `${month}-${Date.now().toString(36)}`,
       month,
       generatedAt: new Date().toISOString(),
-      provider,
+      provider,                 // NB: provider + model only — never the API key
       model: gen.model,
+      modelAuto: !!picked.auto,
       entryCount: slice.length,
-      rangeStart,
-      rangeEnd,
+      lookbackDays: lookback,
+      rangeStart,               // first entry date actually included
+      rangeEnd,                 // last entry date actually included
       themeSummary: themes.length ? themes.slice(0, 4).map((t) => t.label).join(', ') : 'none detected',
       themes,
       report: reportMd,
@@ -738,20 +926,36 @@ async function deleteCurrentReport() {
   toast('Report deleted.', 'ok');
 }
 
+// Exported markdown carries the coverage header, so a copied/downloaded report
+// still states which month and exactly which days it was built from.
+function reportMarkdown(r) {
+  if (!r.rangeStart || !r.rangeEnd) return r.report;
+  const header = [
+    `<!-- ${r.month} · entries ${r.rangeStart} → ${r.rangeEnd} -->`,
+    `**Month:** ${r.month}  `,
+    `**Entries read:** ${r.rangeStart} → ${r.rangeEnd} (${r.entryCount || 0} entries)`,
+    '',
+    '---',
+    '',
+  ].join('\n');
+  return header + r.report;
+}
 function copyCurrentReport() {
   const r = currentReport();
   if (!r) return;
-  navigator.clipboard.writeText(r.report)
+  navigator.clipboard.writeText(reportMarkdown(r))
     .then(() => toast('Markdown copied.', 'ok'))
     .catch(() => toast('Copy failed.', 'err'));
 }
 function downloadCurrentReport() {
   const r = currentReport();
   if (!r) return;
-  const blob = new Blob([r.report], { type: 'text/markdown' });
+  const blob = new Blob([reportMarkdown(r)], { type: 'text/markdown' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = `${r.month}.md`;
+  a.download = (r.rangeStart && r.rangeEnd)
+    ? `${r.month}_${r.rangeStart}_to_${r.rangeEnd}.md`
+    : `${r.month}.md`;
   a.click();
   URL.revokeObjectURL(a.href);
 }
@@ -800,11 +1004,17 @@ function renderReport(r) {
   if (!r) return showEmpty();
   $('#empty-state').classList.add('hidden');
   $('#report-view').classList.remove('hidden');
-  $('#report-title').textContent = `${r.month} · self-interrogation`;
-  $('#meta-month').textContent = r.month;
+  // Month AND the exact span of days that went into the summary — the title
+  // carries both so the covered dates are visible at a glance.
+  const hasRange = !!(r.rangeStart && r.rangeEnd);
+  $('#report-title').textContent = hasRange
+    ? `${r.month} · ${fmtDayRange(r.rangeStart, r.rangeEnd)}`
+    : `${r.month} · self-interrogation`;
+  $('#meta-month').textContent = `month ${r.month}`;
   const rangeEl = $('#meta-range');
-  if (r.rangeStart && r.rangeEnd) {
-    rangeEl.textContent = `${fmtDayRange(r.rangeStart, r.rangeEnd)}${r.entryCount ? ` · ${r.entryCount} entries` : ''}`;
+  if (hasRange) {
+    rangeEl.textContent =
+      `read ${r.rangeStart} → ${r.rangeEnd}${r.entryCount ? ` · ${r.entryCount} entries` : ''}`;
     rangeEl.classList.remove('hidden');
   } else if (r.entryCount) {
     rangeEl.textContent = `${r.entryCount} entries`;
@@ -813,7 +1023,8 @@ function renderReport(r) {
     rangeEl.textContent = '';
     rangeEl.classList.add('hidden');
   }
-  $('#meta-model').textContent = r.provider ? `${providerLabel(r.provider)} · ${r.model}` : r.model;
+  const modelText = r.provider ? `${providerLabel(r.provider)} · ${r.model}` : r.model;
+  $('#meta-model').textContent = modelText + (r.modelAuto ? ' (auto)' : '');
   $('#meta-date').textContent = fmtDate(r.generatedAt);
   const tags = $('#theme-tags');
   tags.innerHTML = '';
@@ -924,6 +1135,8 @@ function confirmDialog(title, text) {
 function openSettings() { $('#settings-modal').classList.remove('hidden'); }
 function closeSettings() { $('#settings-modal').classList.add('hidden'); }
 
+const CUSTOM_MODEL = '__custom__';
+
 function fillSettings() {
   const c = cfg();
   $('#set-github-token').value = c.githubToken;
@@ -935,27 +1148,71 @@ function fillSettings() {
   $('#set-repo').value = c.repo;
   $('#set-notes-path').value = c.notesPath;
   $('#set-branch').value = c.branch;
-  populateModelOptions();
+  syncProviderUI();
 }
-function ensureModelOption(name) {
-  const sel = $('#set-model');
-  if (sel && name && ![...sel.options].some((o) => o.value === name)) {
-    const o = document.createElement('option');
-    o.value = name; o.textContent = name;
-    sel.appendChild(o);
-  }
+
+// Show ONLY the API key field belonging to the selected provider, then rebuild
+// the model picker for it.
+function syncProviderUI() {
+  const provider = activeProvider();
+  $$('[data-provider-key]').forEach((el) => {
+    el.classList.toggle('hidden', el.dataset.providerKey !== provider);
+  });
+  populateModelOptions(provider);
 }
-// Rebuild the model dropdown for the given provider, selecting its stored model.
+
+// Rebuild the model dropdown. Always offers Auto + Custom; real model ids come
+// from the cached discovery list. With no key we show ONLY Auto/Custom plus a
+// hint — rendering the static fallback chain here would present hardcoded
+// constants as if they were live data from the vendor.
 function populateModelOptions(provider = activeProvider()) {
   const sel = $('#set-model');
   if (!sel) return;
-  const current = providerModel(provider);
-  const preset = PROVIDER_MODELS[provider] || [];
-  const list = preset.includes(current) ? preset : [current, ...preset];
+  const pinned = pinnedModel(provider);
+  const key = providerKey(provider);
+  let discovered = [];
+  if (key) {
+    try {
+      const raw = localStorage.getItem(discoveryCacheKey(provider, key));
+      const hit = raw ? JSON.parse(raw) : null;
+      if (hit && Array.isArray(hit.models)) discovered = hit.models.map((m) => m.id);
+    } catch { /* ignore a corrupt cache entry */ }
+  }
+
   sel.innerHTML = '';
-  list.forEach((m) => { const o = document.createElement('option'); o.value = m; o.textContent = m; sel.appendChild(o); });
-  sel.value = current;
+  const addOpt = (value, text) => {
+    const o = document.createElement('option');
+    o.value = value; o.textContent = text;
+    sel.appendChild(o);
+    return o;
+  };
+  addOpt('', 'Auto (newest available)');
+  discovered.forEach((m) => addOpt(m, m));
+  // A pinned model that isn't in the discovered list still needs an entry.
+  if (pinned && !discovered.includes(pinned)) addOpt(pinned, pinned);
+  addOpt(CUSTOM_MODEL, 'Custom…');
+  sel.value = pinned || '';
+
+  const custom = $('#set-model-custom');
+  if (custom) { custom.value = ''; custom.classList.add('hidden'); }
+  updateModelHint(provider, discovered.length);
 }
+
+function updateModelHint(provider = activeProvider(), count = null) {
+  const el = $('#model-hint');
+  if (!el) return;
+  const p = PROVIDERS[provider];
+  if (!providerKey(provider)) {
+    el.textContent = `Add your ${p.label} API key to load the models it can access.`;
+    return;
+  }
+  const pinned = pinnedModel(provider);
+  if (pinned) { el.textContent = `Pinned to ${pinned}. Choose Auto to always use the newest.`; return; }
+  el.textContent = count
+    ? `Auto picks the newest of ${count} models your key can access. Refresh to re-check.`
+    : 'Auto picks the newest model your key can access. Hit Refresh to load the list.';
+}
+
 function flashSaved() {
   const el = $('#settings-saved');
   el.textContent = 'saved ✓';
@@ -963,21 +1220,15 @@ function flashSaved() {
   flashSaved._t = setTimeout(() => (el.textContent = 'changes auto-save'), 1200);
 }
 
+// Manual refresh: force a live re-discovery for the active provider.
 async function refreshModels() {
   const provider = activeProvider();
   if (!providerKey(provider)) { toast(`Add your ${providerLabel(provider)} API key first.`, 'err'); return; }
   const btn = $('#btn-refresh-models');
   btn.disabled = true; const prev = btn.textContent; btn.textContent = '…';
   try {
-    let models = await listModelsForProvider(provider);
-    if (provider === 'gemini') models = models.sort((a, b) => rankModel(b) - rankModel(a));
-    const sel = $('#set-model');
-    const current = sel.value;
-    sel.innerHTML = '';
-    models.forEach((m) => { const o = document.createElement('option'); o.value = m; o.textContent = m; sel.appendChild(o); });
-    ensureModelOption(current);
-    sel.value = models.includes(current) ? current : (models[0] || current);
-    setCfg(PROVIDERS[provider].modelCfg, sel.value);
+    const models = await discoverModels(provider, providerKey(provider), { force: true });
+    populateModelOptions(provider);   // reads the cache we just wrote
     toast(`Loaded ${models.length} ${providerLabel(provider)} models.`, 'ok');
   } catch (e) {
     toast(e.message, 'err');
@@ -1017,12 +1268,15 @@ async function testConnections() {
     done(tRepo, r.ok, r.ok ? `Notes file: ok (${notesPath})` : `Notes file: failed (${r.status})`);
   } catch (e) { done(tRepo, false, 'Notes file: failed'); }
 
+  // Only the ACTIVE provider is tested — that's the key a report will use.
   const provider = activeProvider();
   const tGen = line(`${providerLabel(provider)} key`);
   try {
-    const models = await listModelsForProvider(provider);
-    done(tGen, true, `${providerLabel(provider)} key: ok (${models.length} models)`);
-  } catch (e) { done(tGen, false, `${providerLabel(provider)} key: failed`); }
+    const models = await discoverModels(provider, providerKey(provider), { force: true });
+    populateModelOptions(provider);
+    const pick = pinnedModel(provider) || (models[0] && models[0].id) || PROVIDERS[provider].fallbacks[0];
+    done(tGen, true, `${providerLabel(provider)} key: ok (${models.length} models · will use ${pick})`);
+  } catch (e) { done(tGen, false, `${providerLabel(provider)} key: failed (${e.message})`); }
 }
 
 /* ============================================================ password gate */
@@ -1060,16 +1314,39 @@ function bindSettingsInputs() {
       setCfg(key, e.target.value.trim());
       flashSaved();
       updateChecklist();
+      // A newly-entered key changes what the model picker can offer.
+      if (/^set-(openai|anthropic|gemini)-key$/.test(id)) populateModelOptions();
     });
   }
-  // Provider switch: repopulate the model list for the newly-selected provider.
+
+  // Provider switch: swap which key field is visible and rebuild the models.
   $('#set-provider').addEventListener('change', (e) => {
-    setCfg('provider', e.target.value);
-    populateModelOptions();
+    setCfg('activeProvider', e.target.value);
+    syncProviderUI();
     flashSaved();
     updateChecklist();
   });
-  $('#set-model').addEventListener('change', (e) => { setCfg(PROVIDERS[activeProvider()].modelCfg, e.target.value); flashSaved(); });
+
+  $('#set-model').addEventListener('change', (e) => {
+    const custom = $('#set-model-custom');
+    if (e.target.value === CUSTOM_MODEL) {
+      custom.classList.remove('hidden');
+      custom.focus();
+      return;                       // nothing stored until they type an id
+    }
+    custom.classList.add('hidden');
+    custom.value = '';
+    // Blank stays blank in storage — that is what keeps Auto working.
+    setCfg(PROVIDERS[activeProvider()].modelCfg, e.target.value);
+    updateModelHint();
+    flashSaved();
+  });
+
+  $('#set-model-custom').addEventListener('input', (e) => {
+    setCfg(PROVIDERS[activeProvider()].modelCfg, e.target.value.trim());
+    updateModelHint();
+    flashSaved();
+  });
 
   // Password: hash and store on blur/change if non-empty.
   $('#set-password').addEventListener('change', async (e) => {
