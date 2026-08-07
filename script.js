@@ -7,10 +7,11 @@
        100% PRIVATE. Only the static files in this `docs/` folder are public.
      • All persistent data (reports + metadata) lives in a PRIVATE GitHub Gist
        as JSON. The Gist stays PRIVATE.
-     • Secrets (GitHub token, Gist ID, Gemini API key, selected model) are kept
-       EXCLUSIVELY in this browser's localStorage. They are NEVER written into
-       any file in this public `docs/` folder — only sent directly over HTTPS to
-       api.github.com and generativelanguage.googleapis.com.
+     • Secrets (GitHub token, Gist ID, per-provider API keys, selected provider
+       + model) are kept EXCLUSIVELY in this browser's localStorage. They are
+       NEVER written into any file in this public `docs/` folder — only sent
+       directly over HTTPS to api.github.com and, for the selected provider,
+       one of api.openai.com / api.anthropic.com / generativelanguage.googleapis.com.
    ========================================================================== */
 
 'use strict';
@@ -18,27 +19,52 @@
 /* -------------------------------------------------------------- constants */
 const GIST_FILE = 'monthly-reports.json';
 const LS = {
-  githubToken: 'msi.githubToken',
-  gistId:      'msi.gistId',
-  geminiKey:   'msi.geminiKey',
-  geminiModel: 'msi.geminiModel',
-  repo:        'msi.repo',
-  notesPath:   'msi.notesPath',
-  branch:      'msi.branch',
-  theme:       'msi.theme',
-  passHash:    'msi.passHash',
-  gistCache:   'msi.gistCache',
-  lastId:      'msi.lastId',
+  githubToken:  'msi.githubToken',
+  gistId:       'msi.gistId',
+  provider:     'msi.provider',
+  openaiKey:    'msi.openaiKey',
+  openaiModel:  'msi.openaiModel',
+  anthropicKey: 'msi.anthropicKey',
+  anthropicModel: 'msi.anthropicModel',
+  geminiKey:    'msi.geminiKey',
+  geminiModel:  'msi.geminiModel',
+  repo:         'msi.repo',
+  notesPath:    'msi.notesPath',
+  branch:       'msi.branch',
+  theme:        'msi.theme',
+  passHash:     'msi.passHash',
+  gistCache:    'msi.gistCache',
+  lastId:       'msi.lastId',
 };
 // Gist ID pre-filled from the private gist provided by the user.
 const DEFAULTS = {
-  githubToken: '',
-  gistId:      'ead6fb9238714dfc51d0b3fea495e899',
-  geminiKey:   '',
-  geminiModel: 'gemini-flash-latest',
-  repo:        'kalistamp/Daily_ng',
-  notesPath:   '2026/2026daily_pt1.md',
-  branch:      'main',
+  githubToken:  '',
+  gistId:       'ead6fb9238714dfc51d0b3fea495e899',
+  provider:     'openai',            // default summarization provider (was gemini)
+  openaiKey:    '',
+  openaiModel:  'gpt-4o',
+  anthropicKey: '',
+  anthropicModel: 'claude-opus-5',
+  geminiKey:    '',
+  geminiModel:  'gemini-flash-latest',
+  repo:         'kalistamp/Daily_ng',
+  notesPath:    '2026/2026daily_pt1.md',
+  branch:       'main',
+};
+
+// Summarization providers. Each has its own API key + model, stored separately
+// in localStorage so the user can keep a distinct key per provider and switch
+// between them freely. `keyInput` maps to the settings <input> id.
+const PROVIDERS = {
+  openai:    { label: 'OpenAI',    keyCfg: 'openaiKey',    modelCfg: 'openaiModel',    keyInput: 'set-openai-key' },
+  anthropic: { label: 'Anthropic', keyCfg: 'anthropicKey', modelCfg: 'anthropicModel', keyInput: 'set-anthropic-key' },
+  gemini:    { label: 'Gemini',    keyCfg: 'geminiKey',    modelCfg: 'geminiModel',    keyInput: 'set-gemini-key' },
+};
+// Static starting options per provider (the Refresh button pulls the live list).
+const PROVIDER_MODELS = {
+  openai:    ['gpt-4o', 'gpt-4o-mini', 'gpt-4.1', 'gpt-4.1-mini'],
+  anthropic: ['claude-opus-5', 'claude-sonnet-5', 'claude-haiku-4-5'],
+  gemini:    ['gemini-flash-latest', 'gemini-pro-latest', 'gemini-flash-lite-latest', 'gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.0-flash'],
 };
 
 // Light local theme buckets. Substring counting — intentionally rough; the
@@ -87,12 +113,21 @@ function setCfg(key, value) {
 }
 function cfg() { return state.cfg; }
 
+/* ----------------------------------------------------------- providers */
+function activeProvider() {
+  const p = cfg().provider;
+  return PROVIDERS[p] ? p : 'openai';
+}
+function providerLabel(p) { return (PROVIDERS[p] && PROVIDERS[p].label) || p; }
+function providerKey(p = activeProvider())   { return cfg()[PROVIDERS[p].keyCfg]; }
+function providerModel(p = activeProvider()) { return cfg()[PROVIDERS[p].modelCfg] || PROVIDER_MODELS[p][0]; }
+
 function missingSecrets() {
   const c = cfg();
   const miss = [];
   if (!c.githubToken) miss.push('token');
   if (!c.gistId)      miss.push('gist');
-  if (!c.geminiKey)   miss.push('gemini');
+  if (!providerKey()) miss.push('apikey');   // the ACTIVE provider's key
   return miss;
 }
 
@@ -107,62 +142,15 @@ function ghHeaders(accept = 'application/vnd.github+json') {
 const encPath = (p) => p.split('/').map(encodeURIComponent).join('/');
 
 /* ---------------------------------------------------------------------------
-   REPO WRITE SAFETY  ·  the daily journal is STRICTLY READ-ONLY
+   REPO ACCESS IS READ-ONLY  ·  the app performs NO repo writes at all
    ---------------------------------------------------------------------------
-   HARD INVARIANT: this app may WRITE repo content to exactly ONE shape of path
-   — `monthly-reports/YYYY-MM.md` — and nothing else. The daily journal
-   (2026/2026daily_pt1.md) and every other repo file are read-only. Every repo
-   write MUST route through githubPutRepoFile(), which calls assertRepoWritable()
-   BEFORE any network request. No code path PUT/PATCH/DELETEs the journal, and
-   the guard resolves `.`/`..` so path traversal can never reach it.
+   This app never writes to the repository. It only READs the daily journal
+   (2026/2026daily_pt1.md) via GET. The former "Commit to repo" feature was
+   removed, so there is no PUT/PATCH/DELETE against any repo path anywhere in
+   this file. The only GitHub writes performed are PATCHes to the private GIST
+   (gistPushNow). Pair this with a token scoped to Contents:Read-only so GitHub
+   itself rejects any repo write, journal included.
 --------------------------------------------------------------------------- */
-const REPO_WRITE_ALLOW = /^monthly-reports\/\d{4}-\d{2}\.md$/;
-
-// Collapse slashes and resolve "." / ".." so a crafted value can't traverse out
-// of monthly-reports/ into the journal (e.g. "monthly-reports/../2026/…").
-function normalizeRepoPath(p) {
-  const out = [];
-  for (const seg of String(p).replace(/^\/+/, '').split('/')) {
-    if (seg === '' || seg === '.') continue;
-    if (seg === '..') { out.pop(); continue; }
-    out.push(seg);
-  }
-  return out.join('/');
-}
-
-// Throws unless `path` is an allowlisted report file. Also explicitly refuses
-// the journal path as a belt-and-suspenders denylist.
-function assertRepoWritable(path) {
-  const norm = normalizeRepoPath(path);
-  const journal = normalizeRepoPath(cfg().notesPath || DEFAULTS.notesPath);
-  if (norm === journal || norm === normalizeRepoPath(DEFAULTS.notesPath)) {
-    throw new Error(`Blocked: "${norm}" is the read-only journal and must never be written.`);
-  }
-  if (!REPO_WRITE_ALLOW.test(norm)) {
-    throw new Error(`Blocked: repo writes are limited to monthly-reports/YYYY-MM.md (got "${norm}").`);
-  }
-  return norm;
-}
-
-// The ONLY function permitted to write repo content. Guarded before any fetch.
-async function githubPutRepoFile(path, markdown, message) {
-  const safePath = assertRepoWritable(path);
-  const { repo, branch } = cfg();
-  const apiPath = encPath(safePath);
-  let sha;
-  const get = await fetch(`https://api.github.com/repos/${repo}/contents/${apiPath}?ref=${encodeURIComponent(branch)}`, { headers: ghHeaders() });
-  if (get.ok) sha = (await get.json()).sha;
-  const body = { message, content: b64EncodeUnicode(markdown), branch };
-  if (sha) body.sha = sha;
-  const res = await fetch(`https://api.github.com/repos/${repo}/contents/${apiPath}`, {
-    method: 'PUT', headers: ghHeaders(), body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const e = await res.json().catch(() => ({}));
-    throw new Error(e.message || `Commit failed (${res.status}). Token needs Contents:write on ${repo}.`);
-  }
-  return (await res.json()).content?.html_url;
-}
 
 // READ-ONLY: issues only GET requests against the journal. Never writes it.
 async function githubFetchNotes() {
@@ -227,20 +215,6 @@ async function gistPushNow() {
     throw new Error(e.message || `Gist write failed (${res.status}). Token needs Gists:write.`);
   }
   localStorage.setItem(LS.gistCache, JSON.stringify(state.data));
-}
-
-// Commits a generated report to monthly-reports/YYYY-MM.md ONLY. `month` is
-// strictly validated, then the write is funneled through the guarded choke
-// point (githubPutRepoFile) so it can never target the journal.
-async function githubCommitReport(month, markdown) {
-  if (!/^\d{4}-\d{2}$/.test(String(month))) {
-    throw new Error(`Invalid report month "${month}" — expected YYYY-MM.`);
-  }
-  return githubPutRepoFile(
-    `monthly-reports/${month}.md`,
-    markdown,
-    `Add monthly self-interrogation report ${month}`
-  );
 }
 
 /* ================================================================= Gemini */
@@ -318,11 +292,13 @@ async function geminiGenerateSmart(preferred, systemText, userText, onModel) {
   throw new Error(`No available Gemini model worked (tried ${tried.size}). Last error: ${lastErr ? lastErr.message : 'unknown'}`);
 }
 
-function rememberModel(model) {
-  if (model === cfg().geminiModel) return;
-  setCfg('geminiModel', model);
+function rememberModel(model, provider = activeProvider()) {
+  const modelCfg = PROVIDERS[provider].modelCfg;
+  if (model === cfg()[modelCfg]) return;
+  setCfg(modelCfg, model);
+  if (provider !== activeProvider()) return;
   ensureModelOption(model);
-  const sel = $('#set-gemini-model');
+  const sel = $('#set-model');
   if (sel) sel.value = model;
 }
 
@@ -344,6 +320,112 @@ function rankModel(name) {
   if (n.includes('latest')) score += 25;
   if (/exp|preview|thinking|image|audio|tts|vision|learnlm|embedding|aqa|gemma/.test(n)) score -= 300;
   return score;
+}
+
+/* ================================================================= OpenAI */
+// Chat Completions endpoint. OpenAI serves permissive CORS for API-key calls,
+// so a direct browser fetch works (same client-side model as Gemini). We send
+// only model + messages — omitting temperature / token caps keeps the request
+// compatible across the whole model zoo (reasoning models reject custom
+// temperature and use max_completion_tokens instead of max_tokens).
+async function openaiGenerate(model, systemText, userText) {
+  const res = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${providerKey('openai')}` },
+    body: JSON.stringify({
+      model,
+      messages: [
+        { role: 'system', content: systemText },
+        { role: 'user', content: userText },
+      ],
+    }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err = new Error(data?.error?.message || `OpenAI request failed (${res.status}).`);
+    err.status = res.status;
+    throw err;
+  }
+  const text = (data?.choices?.[0]?.message?.content || '').trim();
+  if (!text) throw new Error(`OpenAI returned no text (${data?.choices?.[0]?.finish_reason || 'empty response'}).`);
+  return text;
+}
+
+async function openaiListModels() {
+  const res = await fetch('https://api.openai.com/v1/models', {
+    headers: { Authorization: `Bearer ${providerKey('openai')}` },
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data?.error?.message || `Model list failed (${res.status}).`);
+  return (data.data || [])
+    .map((m) => m.id)
+    .filter((id) => /^(gpt-|o[0-9]|chatgpt)/i.test(id))
+    .filter((id) => !/embedding|whisper|audio|tts|realtime|image|dall|moderation|transcribe|search|instruct/i.test(id))
+    .sort();
+}
+
+/* ============================================================== Anthropic */
+// Messages endpoint. Anthropic blocks browser CORS unless the request carries
+// `anthropic-dangerous-direct-browser-access: true`; the API version header is
+// also required. Response text lives in content[] blocks of type "text".
+function anthropicHeaders() {
+  return {
+    'Content-Type': 'application/json',
+    'x-api-key': providerKey('anthropic'),
+    'anthropic-version': '2023-06-01',
+    'anthropic-dangerous-direct-browser-access': 'true',
+  };
+}
+async function anthropicGenerate(model, systemText, userText) {
+  const res = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: anthropicHeaders(),
+    body: JSON.stringify({
+      model,
+      max_tokens: 8192,          // room for the multi-section report (+ any model thinking)
+      system: systemText,
+      messages: [{ role: 'user', content: userText }],
+    }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err = new Error(data?.error?.message || `Anthropic request failed (${res.status}).`);
+    err.status = res.status;
+    throw err;
+  }
+  if (data?.stop_reason === 'refusal') throw new Error('Anthropic declined this request (refusal).');
+  const text = (data?.content || [])
+    .filter((b) => b && b.type === 'text')
+    .map((b) => b.text || '')
+    .join('')
+    .trim();
+  if (!text) throw new Error(`Anthropic returned no text (${data?.stop_reason || 'empty response'}).`);
+  return text;
+}
+
+async function anthropicListModels() {
+  const res = await fetch('https://api.anthropic.com/v1/models', { headers: anthropicHeaders() });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data?.error?.message || `Model list failed (${res.status}).`);
+  return (data.data || []).map((m) => m.id).filter((id) => /^claude/i.test(id));
+}
+
+/* ====================================================== provider dispatch */
+// Returns { text, model, fellBack }. Gemini keeps its ordered-fallback logic
+// (its model names churn); OpenAI/Anthropic use a single call with clear errors.
+async function providerGenerate(provider, model, systemText, userText, onModel) {
+  if (provider === 'gemini') return geminiGenerateSmart(model, systemText, userText, onModel);
+  if (onModel) onModel(model, false);
+  const text = provider === 'openai'
+    ? await openaiGenerate(model, systemText, userText)
+    : await anthropicGenerate(model, systemText, userText);
+  return { text, model, fellBack: false };
+}
+
+async function listModelsForProvider(provider) {
+  if (provider === 'gemini')    return geminiListModels();
+  if (provider === 'openai')    return openaiListModels();
+  return anthropicListModels();
 }
 
 /* ==================================================== notes parse + slice */
@@ -448,14 +530,9 @@ function buildUserPrompt(monthStr, slice, themes, loops) {
 }
 
 /* ============================================================ base64 utf8 */
-function b64EncodeUnicode(str) {
-  const bytes = new TextEncoder().encode(str);
-  let bin = '';
-  bytes.forEach((b) => (bin += String.fromCharCode(b)));
-  return btoa(bin);
-}
 // GitHub returns base64 with embedded newlines; strip whitespace, then decode
 // as UTF-8 (atob alone mangles multi-byte chars like em dashes / arrows).
+// (Read-only: only a DECODER is needed — the app never encodes/writes repo files.)
 function b64DecodeUnicode(b64) {
   const bin = atob((b64 || '').replace(/\s/g, ''));
   const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
@@ -570,7 +647,8 @@ async function generateReport() {
   }
   const month = $('#target-month').value || prevMonthStr();
   const lookback = clampInt($('#lookback-days').value, 0, 60, 14);
-  const model = cfg().geminiModel || DEFAULTS.geminiModel;
+  const provider = activeProvider();
+  const model = providerModel(provider);
   const btn = $('#btn-generate');
   btn.disabled = true;
   showProgress(true, 'Fetching journal…');
@@ -586,9 +664,13 @@ async function generateReport() {
     const themes = analyzeThemes(joined);
     const loops = findOpenLoops(slice);
 
+    // slice is sorted ascending, so first/last entries bound what was read.
+    const rangeStart = slice[0].date;
+    const rangeEnd = slice[slice.length - 1].date;
+
     showProgress(true, `Interrogating ${model}…`);
-    const gen = await geminiGenerateSmart(
-      model, buildSystemPrompt(), buildUserPrompt(month, slice, themes, loops),
+    const gen = await providerGenerate(
+      provider, model, buildSystemPrompt(), buildUserPrompt(month, slice, themes, loops),
       (m, isFallback) => showProgress(true, `${isFallback ? 'Falling back to' : 'Interrogating'} ${m}…`)
     );
     const reportMd = gen.text;
@@ -598,8 +680,11 @@ async function generateReport() {
       id: `${month}-${Date.now().toString(36)}`,
       month,
       generatedAt: new Date().toISOString(),
+      provider,
       model: gen.model,
       entryCount: slice.length,
+      rangeStart,
+      rangeEnd,
       themeSummary: themes.length ? themes.slice(0, 4).map((t) => t.label).join(', ') : 'none detected',
       themes,
       report: reportMd,
@@ -614,7 +699,7 @@ async function generateReport() {
 
     selectReport(report.id);
     renderHistory();
-    toast(`Report for ${month} generated (${slice.length} entries).`, 'ok');
+    toast(`Report for ${month} generated — ${fmtDayRange(rangeStart, rangeEnd)} (${slice.length} entries).`, 'ok');
   } catch (e) {
     toast(e.message, 'err');
   } finally {
@@ -637,25 +722,6 @@ function selectReport(id) {
   const r = state.data.reports.find((x) => x.id === id);
   if (r) renderReport(r);
   renderHistory();
-}
-
-async function commitCurrentReport() {
-  const r = currentReport();
-  if (!r) return;
-  const btn = $('#btn-commit');
-  btn.disabled = true;
-  const prev = btn.textContent;
-  btn.textContent = 'Committing…';
-  try {
-    const url = await githubCommitReport(r.month, r.report);
-    toast('Committed to private repo → monthly-reports/' + r.month + '.md', 'ok');
-    if (url) toast('View: ' + url, 'ok');
-  } catch (e) {
-    toast(e.message, 'err');
-  } finally {
-    btn.disabled = false;
-    btn.textContent = prev;
-  }
 }
 
 async function deleteCurrentReport() {
@@ -717,9 +783,13 @@ function renderHistory() {
   for (const r of reports) {
     const li = document.createElement('li');
     li.className = 'history-item' + (r.id === state.currentId ? ' active' : '');
+    const modelLabel = r.provider ? `${providerLabel(r.provider)} · ${r.model}` : r.model;
+    const range = (r.rangeStart && r.rangeEnd) ? fmtDayRange(r.rangeStart, r.rangeEnd) : '';
     li.innerHTML =
       `<span class="hi-month">${r.month}</span>` +
-      `<span class="hi-sub"><span>${r.model}</span><span>${fmtDate(r.generatedAt)}</span>` +
+      `<span class="hi-sub">` +
+      (range ? `<span>${range}</span>` : '') +
+      `<span>${modelLabel}</span><span>${fmtDate(r.generatedAt)}</span>` +
       (r.reflection ? '<span>· reflected</span>' : '') + `</span>`;
     li.addEventListener('click', () => selectReport(r.id));
     list.appendChild(li);
@@ -731,8 +801,19 @@ function renderReport(r) {
   $('#empty-state').classList.add('hidden');
   $('#report-view').classList.remove('hidden');
   $('#report-title').textContent = `${r.month} · self-interrogation`;
-  $('#meta-month').textContent = r.month + (r.entryCount ? ` · ${r.entryCount} entries` : '');
-  $('#meta-model').textContent = r.model;
+  $('#meta-month').textContent = r.month;
+  const rangeEl = $('#meta-range');
+  if (r.rangeStart && r.rangeEnd) {
+    rangeEl.textContent = `${fmtDayRange(r.rangeStart, r.rangeEnd)}${r.entryCount ? ` · ${r.entryCount} entries` : ''}`;
+    rangeEl.classList.remove('hidden');
+  } else if (r.entryCount) {
+    rangeEl.textContent = `${r.entryCount} entries`;
+    rangeEl.classList.remove('hidden');
+  } else {
+    rangeEl.textContent = '';
+    rangeEl.classList.add('hidden');
+  }
+  $('#meta-model').textContent = r.provider ? `${providerLabel(r.provider)} · ${r.model}` : r.model;
   $('#meta-date').textContent = fmtDate(r.generatedAt);
   const tags = $('#theme-tags');
   tags.innerHTML = '';
@@ -774,6 +855,23 @@ function fmtDate(iso) {
   if (!iso) return '';
   const d = new Date(iso);
   return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+}
+// Format a 'YYYY-MM-DD' entry date without constructing a Date (avoids UTC/local
+// off-by-one). fmtDayRange renders the exact span of days included in a report.
+const MONTHS_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+function fmtDay(dateStr) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateStr || '');
+  if (!m) return dateStr || '';
+  return `${MONTHS_ABBR[Number(m[2]) - 1]} ${Number(m[3])}`;
+}
+function fmtDayRange(a, b) {
+  if (!a && !b) return '';
+  if (!a) a = b;
+  if (!b) b = a;
+  const ya = a.slice(0, 4), yb = b.slice(0, 4);
+  if (a === b) return `${fmtDay(a)}, ${ya}`;
+  if (ya === yb) return `${fmtDay(a)} – ${fmtDay(b)}, ${yb}`;
+  return `${fmtDay(a)}, ${ya} – ${fmtDay(b)}, ${yb}`;
 }
 function clampInt(v, min, max, dflt) {
   const n = parseInt(v, 10);
@@ -830,20 +928,33 @@ function fillSettings() {
   const c = cfg();
   $('#set-github-token').value = c.githubToken;
   $('#set-gist-id').value = c.gistId;
+  $('#set-provider').value = activeProvider();
+  $('#set-openai-key').value = c.openaiKey;
+  $('#set-anthropic-key').value = c.anthropicKey;
   $('#set-gemini-key').value = c.geminiKey;
   $('#set-repo').value = c.repo;
   $('#set-notes-path').value = c.notesPath;
   $('#set-branch').value = c.branch;
-  ensureModelOption(c.geminiModel);
-  $('#set-gemini-model').value = c.geminiModel;
+  populateModelOptions();
 }
 function ensureModelOption(name) {
-  const sel = $('#set-gemini-model');
-  if (name && ![...sel.options].some((o) => o.value === name)) {
+  const sel = $('#set-model');
+  if (sel && name && ![...sel.options].some((o) => o.value === name)) {
     const o = document.createElement('option');
     o.value = name; o.textContent = name;
     sel.appendChild(o);
   }
+}
+// Rebuild the model dropdown for the given provider, selecting its stored model.
+function populateModelOptions(provider = activeProvider()) {
+  const sel = $('#set-model');
+  if (!sel) return;
+  const current = providerModel(provider);
+  const preset = PROVIDER_MODELS[provider] || [];
+  const list = preset.includes(current) ? preset : [current, ...preset];
+  sel.innerHTML = '';
+  list.forEach((m) => { const o = document.createElement('option'); o.value = m; o.textContent = m; sel.appendChild(o); });
+  sel.value = current;
 }
 function flashSaved() {
   const el = $('#settings-saved');
@@ -853,19 +964,21 @@ function flashSaved() {
 }
 
 async function refreshModels() {
-  if (!cfg().geminiKey) { toast('Add your Gemini API key first.', 'err'); return; }
+  const provider = activeProvider();
+  if (!providerKey(provider)) { toast(`Add your ${providerLabel(provider)} API key first.`, 'err'); return; }
   const btn = $('#btn-refresh-models');
   btn.disabled = true; const prev = btn.textContent; btn.textContent = '…';
   try {
-    const models = (await geminiListModels()).sort((a, b) => rankModel(b) - rankModel(a));
-    const sel = $('#set-gemini-model');
+    let models = await listModelsForProvider(provider);
+    if (provider === 'gemini') models = models.sort((a, b) => rankModel(b) - rankModel(a));
+    const sel = $('#set-model');
     const current = sel.value;
     sel.innerHTML = '';
     models.forEach((m) => { const o = document.createElement('option'); o.value = m; o.textContent = m; sel.appendChild(o); });
     ensureModelOption(current);
     sel.value = models.includes(current) ? current : (models[0] || current);
-    setCfg('geminiModel', sel.value);
-    toast(`Loaded ${models.length} models.`, 'ok');
+    setCfg(PROVIDERS[provider].modelCfg, sel.value);
+    toast(`Loaded ${models.length} ${providerLabel(provider)} models.`, 'ok');
   } catch (e) {
     toast(e.message, 'err');
   } finally { btn.disabled = false; btn.textContent = prev; }
@@ -904,11 +1017,12 @@ async function testConnections() {
     done(tRepo, r.ok, r.ok ? `Notes file: ok (${notesPath})` : `Notes file: failed (${r.status})`);
   } catch (e) { done(tRepo, false, 'Notes file: failed'); }
 
-  const tGem = line('Gemini key');
+  const provider = activeProvider();
+  const tGen = line(`${providerLabel(provider)} key`);
   try {
-    const models = await geminiListModels();
-    done(tGem, true, `Gemini key: ok (${models.length} models)`);
-  } catch (e) { done(tGem, false, `Gemini key: failed`); }
+    const models = await listModelsForProvider(provider);
+    done(tGen, true, `${providerLabel(provider)} key: ok (${models.length} models)`);
+  } catch (e) { done(tGen, false, `${providerLabel(provider)} key: failed`); }
 }
 
 /* ============================================================ password gate */
@@ -934,6 +1048,8 @@ function bindSettingsInputs() {
   const map = {
     'set-github-token': 'githubToken',
     'set-gist-id': 'gistId',
+    'set-openai-key': 'openaiKey',
+    'set-anthropic-key': 'anthropicKey',
     'set-gemini-key': 'geminiKey',
     'set-repo': 'repo',
     'set-notes-path': 'notesPath',
@@ -946,7 +1062,14 @@ function bindSettingsInputs() {
       updateChecklist();
     });
   }
-  $('#set-gemini-model').addEventListener('change', (e) => { setCfg('geminiModel', e.target.value); flashSaved(); });
+  // Provider switch: repopulate the model list for the newly-selected provider.
+  $('#set-provider').addEventListener('change', (e) => {
+    setCfg('provider', e.target.value);
+    populateModelOptions();
+    flashSaved();
+    updateChecklist();
+  });
+  $('#set-model').addEventListener('change', (e) => { setCfg(PROVIDERS[activeProvider()].modelCfg, e.target.value); flashSaved(); });
 
   // Password: hash and store on blur/change if non-empty.
   $('#set-password').addEventListener('change', async (e) => {
@@ -1009,7 +1132,6 @@ function init() {
   $('#btn-generate').addEventListener('click', generateReport);
   $('#btn-copy').addEventListener('click', copyCurrentReport);
   $('#btn-download').addEventListener('click', downloadCurrentReport);
-  $('#btn-commit').addEventListener('click', commitCurrentReport);
   $('#btn-delete').addEventListener('click', deleteCurrentReport);
   $('#reflection-input').addEventListener('input', onReflectionInput);
 
