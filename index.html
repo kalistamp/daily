@@ -11,10 +11,11 @@
       markdown stays 100% PRIVATE.
     - All persistent data (generated reports + metadata) is stored in a PRIVATE
       GitHub Gist as JSON. The Gist stays PRIVATE.
-    - Secrets (GitHub token, Gist ID, Gemini API key, selected model) live
-      EXCLUSIVELY in this browser's localStorage. They are NEVER written into
-      any file in this public `docs/` folder, and never leave the browser
-      except in direct HTTPS calls to api.github.com / generativelanguage.googleapis.com.
+    - Secrets (GitHub token, Gist ID, per-provider API keys, selected provider
+      + model) live EXCLUSIVELY in this browser's localStorage. They are NEVER
+      written into any file in this public `docs/` folder, and never leave the
+      browser except in direct HTTPS calls to api.github.com and, for the
+      selected provider, api.openai.com / api.anthropic.com / generativelanguage.googleapis.com.
     - Because the repo and Gist are both private, nobody can read any of your
       data without YOUR own GitHub token + Gist ID entered on YOUR machine.
   ============================================================================
@@ -124,7 +125,7 @@
           <ul class="checklist" id="setup-checklist">
             <li data-check="token"><span class="chk"></span> GitHub token</li>
             <li data-check="gist"><span class="chk"></span> Gist ID</li>
-            <li data-check="gemini"><span class="chk"></span> Gemini API key</li>
+            <li data-check="apikey"><span class="chk"></span> Provider API key</li>
           </ul>
         </section>
 
@@ -134,6 +135,7 @@
               <h2 id="report-title">Report</h2>
               <div class="meta-row">
                 <span class="meta-chip" id="meta-month"></span>
+                <span class="meta-chip" id="meta-range"></span>
                 <span class="meta-chip" id="meta-model"></span>
                 <span class="meta-chip" id="meta-date"></span>
               </div>
@@ -142,7 +144,6 @@
             <div class="report-tools">
               <button id="btn-copy" class="btn btn-ghost" title="Copy markdown">Copy</button>
               <button id="btn-download" class="btn btn-ghost" title="Download .md">Download</button>
-              <button id="btn-commit" class="btn btn-ghost" title="Commit to private repo">Commit to repo</button>
               <button id="btn-delete" class="btn btn-danger-ghost" title="Delete this report">Delete</button>
             </div>
           </div>
@@ -195,6 +196,46 @@
             <input type="text" id="set-gist-id" placeholder="ead6fb9238714dfc51d0b3fea495e899" autocomplete="off" spellcheck="false" />
             <span class="field-hint">The private Gist used as your data store.</span>
           </label>
+        </section>
+
+        <section class="settings-section">
+          <h3 class="settings-heading">Summarization model</h3>
+          <p class="settings-help muted">
+            Choose which provider writes the report. Each provider keeps its own
+            API key &mdash; all stored only in this browser.
+          </p>
+
+          <label class="field">
+            <span class="field-label">Provider</span>
+            <select id="set-provider">
+              <option value="openai">OpenAI</option>
+              <option value="anthropic">Anthropic (Claude)</option>
+              <option value="gemini">Gemini</option>
+            </select>
+            <span class="field-hint">The report is generated with the selected provider's key + model.</span>
+          </label>
+
+          <label class="field">
+            <span class="field-label">OpenAI API key</span>
+            <div class="input-reveal">
+              <input type="password" id="set-openai-key" placeholder="sk-…" autocomplete="off" spellcheck="false" />
+              <button type="button" class="reveal-btn" data-reveal="set-openai-key" title="Show / hide">&#128065;</button>
+            </div>
+            <span class="field-hint">
+              Key from <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener">platform.openai.com/api-keys</a>.
+            </span>
+          </label>
+
+          <label class="field">
+            <span class="field-label">Anthropic API key</span>
+            <div class="input-reveal">
+              <input type="password" id="set-anthropic-key" placeholder="sk-ant-…" autocomplete="off" spellcheck="false" />
+              <button type="button" class="reveal-btn" data-reveal="set-anthropic-key" title="Show / hide">&#128065;</button>
+            </div>
+            <span class="field-hint">
+              Key from <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">console.anthropic.com</a>.
+            </span>
+          </label>
 
           <label class="field">
             <span class="field-label">Gemini API key</span>
@@ -203,24 +244,22 @@
               <button type="button" class="reveal-btn" data-reveal="set-gemini-key" title="Show / hide">&#128065;</button>
             </div>
             <span class="field-hint">
-              Free key from <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a>. Stored only in this browser.
+              Free key from <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a>.
             </span>
           </label>
 
           <label class="field">
-            <span class="field-label">Gemini model</span>
+            <span class="field-label">Model</span>
             <div class="input-row">
-              <select id="set-gemini-model">
-                <option value="gemini-flash-latest">gemini-flash-latest</option>
-                <option value="gemini-pro-latest">gemini-pro-latest</option>
-                <option value="gemini-flash-lite-latest">gemini-flash-lite-latest</option>
-                <option value="gemini-2.5-flash">gemini-2.5-flash</option>
-                <option value="gemini-2.5-pro">gemini-2.5-pro</option>
-                <option value="gemini-2.0-flash">gemini-2.0-flash</option>
+              <select id="set-model">
+                <option value="gpt-4o">gpt-4o</option>
+                <option value="gpt-4o-mini">gpt-4o-mini</option>
+                <option value="gpt-4.1">gpt-4.1</option>
+                <option value="gpt-4.1-mini">gpt-4.1-mini</option>
               </select>
               <button type="button" id="btn-refresh-models" class="btn btn-ghost" title="Fetch available models with your key">Refresh</button>
             </div>
-            <span class="field-hint">Refresh pulls the live model list using your key.</span>
+            <span class="field-hint">Models for the selected provider. Refresh pulls the live list using that provider's key.</span>
           </label>
         </section>
 
