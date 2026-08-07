@@ -202,7 +202,8 @@
           <h3 class="settings-heading">Summarization model</h3>
           <p class="settings-help muted">
             Choose which provider writes the report. Each provider keeps its own
-            API key &mdash; all stored only in this browser.
+            API key, so switching never loses the others. Keys live only in this
+            browser and are <strong>never</strong> synced to the Gist.
           </p>
 
           <label class="field">
@@ -212,13 +213,15 @@
               <option value="anthropic">Anthropic (Claude)</option>
               <option value="gemini">Gemini</option>
             </select>
-            <span class="field-hint">The report is generated with the selected provider's key + model.</span>
+            <span class="field-hint">Only the selected provider's key and model are used.</span>
           </label>
 
-          <label class="field">
+          <!-- Only the key field for the selected provider is visible; the
+               others are hidden by syncProviderUI(). -->
+          <label class="field" data-provider-key="openai">
             <span class="field-label">OpenAI API key</span>
             <div class="input-reveal">
-              <input type="password" id="set-openai-key" placeholder="sk-…" autocomplete="off" spellcheck="false" />
+              <input type="password" id="set-openai-key" placeholder="sk-&hellip;" autocomplete="off" spellcheck="false" />
               <button type="button" class="reveal-btn" data-reveal="set-openai-key" title="Show / hide">&#128065;</button>
             </div>
             <span class="field-hint">
@@ -226,10 +229,10 @@
             </span>
           </label>
 
-          <label class="field">
+          <label class="field hidden" data-provider-key="anthropic">
             <span class="field-label">Anthropic API key</span>
             <div class="input-reveal">
-              <input type="password" id="set-anthropic-key" placeholder="sk-ant-…" autocomplete="off" spellcheck="false" />
+              <input type="password" id="set-anthropic-key" placeholder="sk-ant-&hellip;" autocomplete="off" spellcheck="false" />
               <button type="button" class="reveal-btn" data-reveal="set-anthropic-key" title="Show / hide">&#128065;</button>
             </div>
             <span class="field-hint">
@@ -237,10 +240,10 @@
             </span>
           </label>
 
-          <label class="field">
+          <label class="field hidden" data-provider-key="gemini">
             <span class="field-label">Gemini API key</span>
             <div class="input-reveal">
-              <input type="password" id="set-gemini-key" placeholder="AIza…" autocomplete="off" spellcheck="false" />
+              <input type="password" id="set-gemini-key" placeholder="AIza&hellip;" autocomplete="off" spellcheck="false" />
               <button type="button" class="reveal-btn" data-reveal="set-gemini-key" title="Show / hide">&#128065;</button>
             </div>
             <span class="field-hint">
@@ -251,15 +254,16 @@
           <label class="field">
             <span class="field-label">Model</span>
             <div class="input-row">
+              <!-- Filled from live discovery. "Auto" is stored as blank so it
+                   resolves to the newest model at request time. -->
               <select id="set-model">
-                <option value="gpt-4o">gpt-4o</option>
-                <option value="gpt-4o-mini">gpt-4o-mini</option>
-                <option value="gpt-4.1">gpt-4.1</option>
-                <option value="gpt-4.1-mini">gpt-4.1-mini</option>
+                <option value="">Auto (newest available)</option>
+                <option value="__custom__">Custom&hellip;</option>
               </select>
               <button type="button" id="btn-refresh-models" class="btn btn-ghost" title="Fetch available models with your key">Refresh</button>
             </div>
-            <span class="field-hint">Models for the selected provider. Refresh pulls the live list using that provider's key.</span>
+            <input type="text" id="set-model-custom" class="hidden" placeholder="exact model id" autocomplete="off" spellcheck="false" />
+            <span class="field-hint" id="model-hint"></span>
           </label>
         </section>
 
