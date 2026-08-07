@@ -11,7 +11,7 @@ step — just static HTML/CSS/JS.
 | These `docs/` static files | **Public** (served via GitHub Pages) |
 | The parent repo (your journal markdown) | **Private** — stays private |
 | The Gist that stores your reports | **Private** — stays private |
-| Your GitHub token / Gist ID / Gemini key | **Only in your browser's localStorage** — never committed anywhere |
+| Your GitHub token / Gist ID / provider API keys | **Only in your browser's localStorage** — never committed anywhere |
 
 Because the repo and Gist are both private, nobody can read your data without
 **your** GitHub token + Gist ID entered on **your** device.
@@ -27,13 +27,22 @@ Because the repo and Gist are both private, nobody can read your data without
 Open **Settings (⚙)** and fill in:
 
 - **GitHub token** — a fine-grained PAT with:
-  - **Contents: Read** on this repo (to fetch the journal), and **Read/Write**
-    if you want the optional "Commit to repo" button to work.
+  - **Contents: Read-only** on this repo (to fetch the journal). The app never
+    writes to the repo, so no write access is needed or wanted.
   - **Gists: Read and write** (to store reports in the private Gist).
 - **Gist ID** — pre-filled with `ead6fb9238714dfc51d0b3fea495e899`.
-- **Gemini API key** — free from <https://aistudio.google.com/apikey>.
-- **Gemini model** — hit **Refresh** to pull the live list, or keep the default
-  `gemini-2.5-flash`.
+- **Provider** — choose which model writes the report: **OpenAI** (the default),
+  **Anthropic (Claude)**, or **Gemini**.
+- **API key** — enter a separate key for each provider you want to use:
+  - **OpenAI** — <https://platform.openai.com/api-keys>
+  - **Anthropic** — <https://console.anthropic.com/settings/keys>
+  - **Gemini** — free from <https://aistudio.google.com/apikey>
+  Only the selected provider's key is used to generate a report; keys stay in
+  this browser and are never committed.
+- **Model** — the dropdown lists models for the selected provider (default
+  `gpt-4o` for OpenAI). Hit **Refresh** to pull the live list with that
+  provider's key. Gemini additionally auto-falls back to an available model if
+  the chosen one is unavailable.
 
 Under **Source (advanced)** the repo (`kalistamp/Daily_ng`), notes path
 (`2026/2026daily_pt1.md`), and branch (`main`) are pre-filled — change the notes
@@ -47,38 +56,35 @@ Hit **Test connections** to verify all four before generating.
    (plus a 7–14 day look-back) from the private journal via the GitHub API.
    Entries are delimited by `### YYYY-MM-DD` headers.
 2. A light **local** pass detects dominant themes and open loops.
-3. A precise system prompt + the month's slice is sent to your selected Gemini
-   model, which returns one Markdown report:
+3. A precise system prompt + the month's slice is sent to your selected
+   provider's model (OpenAI, Anthropic, or Gemini), which returns one Markdown
+   report:
    - executive overview
    - theme-weighted question bank (8–12)
    - contradiction / open-loop detector (4–6)
    - adversarial self-audit (4–6)
    - future-self letter (4–6)
    - cross-domain synthesis (4–6)
-4. The report + timestamp + model + theme summary is saved to the private Gist.
-5. Optionally **Commit to repo** writes it to `monthly-reports/YYYY-MM.md`.
-6. Answer the questions in the **reflection** box — auto-saved to the Gist.
+4. The report + timestamp + provider/model + theme summary + the exact date
+   range read (first → last entry) is saved to the private Gist. Each report
+   shows the target month alongside that start/end span.
+5. Answer the questions in the **reflection** box — auto-saved to the Gist.
 
-## The daily journal is strictly read-only
+## The repo is strictly read-only
 
-The app **only ever reads** `2026/2026daily_pt1.md` (via `GET`). It is never
-written, modified, or deleted. Enforced in `script.js`:
+The app **never writes to the repository.** It only reads `2026/2026daily_pt1.md`
+via `GET`; that file is never written, modified, or deleted. Guaranteed two ways:
 
-- Repo writes go through **one** function, `githubPutRepoFile()`, which calls
-  `assertRepoWritable()` **before any network request**.
-- That guard allows writes to exactly one path shape — `monthly-reports/YYYY-MM.md`
-  — and refuses everything else, including the journal. It resolves `.`/`..`
-  first, so path traversal can't reach the journal, and it also denylists the
-  journal path explicitly.
-- The only repo-write feature is the optional **Commit to repo** button
-  (reports → `monthly-reports/`). There is no code path that writes the journal.
-
-**Strongest guarantee (recommended):** if you don't need the *Commit to repo*
-button, issue your token with **Contents: Read-only** (+ Gists: Read/Write).
-Then GitHub itself rejects any write to *any* repo file — the journal can't be
-touched even by a bug or a compromised page. If you *do* want that button,
-Contents: Read/Write is required (fine-grained PATs can't scope to a subpath),
-and the in-app guard above is what protects the journal.
+- **No write code exists.** The former "Commit to repo" feature was removed, so
+  there is no `PUT`/`PATCH`/`DELETE` against any repo path anywhere in
+  `script.js`. The only GitHub write the app makes is a `PATCH` to the private
+  **Gist** (`gistPushNow`). You can confirm with a one-line audit:
+  `grep -nE "method: *'(PUT|PATCH|DELETE)'" script.js` → the only match is the
+  Gist `PATCH`.
+- **The token can't write anyway.** Use a fine-grained PAT scoped to
+  **Contents: Read-only** (+ **Gists: Read and write**). GitHub itself then
+  rejects any repo write — the journal can't be touched even by a bug or a
+  compromised page. This is the recommended setup and needs no repo write access.
 
 ## Optional device lock
 
