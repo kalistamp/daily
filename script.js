@@ -624,15 +624,13 @@ function parseEntries(md) {
   return entries.map((e) => ({ date: e.date, title: e.title, body: e.lines.join('\n').trim() }));
 }
 
-function sliceForMonth(entries, monthStr, lookbackDays) {
-  const [y, m] = monthStr.split('-').map(Number);
-  const monthEnd = new Date(Date.UTC(y, m, 0));           // last day of target month
-  const start = new Date(Date.UTC(y, m - 1, 1));          // first day of target month
-  start.setUTCDate(start.getUTCDate() - Number(lookbackDays || 0));
+function sliceForRange(entries, startStr, endStr) {
+  const start = new Date(startStr + 'T00:00:00Z');
+  const end = new Date(endStr + 'T00:00:00Z');
   return entries
     .filter((e) => {
       const d = new Date(e.date + 'T00:00:00Z');
-      return !isNaN(d) && d >= start && d <= monthEnd;
+      return !isNaN(d) && d >= start && d <= end;
     })
     .sort((a, b) => a.date.localeCompare(b.date));
 }
@@ -700,7 +698,7 @@ function buildUserPrompt(monthStr, slice, themes, loops) {
   const loopBlock = loops.length ? loops.map((l) => `- ${l}`).join('\n') : '- (none auto-detected)';
   const body = slice.map((e) => `### ${e.date}${e.title ? ' ' + e.title : ''}\n${e.body}`).join('\n\n');
   return [
-    `TARGET MONTH: ${monthStr} (entries below may include a look-back window before the 1st).`,
+    `TARGET MONTH: ${monthStr} (entries below cover the selected date range; may extend outside the month).`,
     `LOCALLY DETECTED THEMES (weight): ${themeLine}`,
     `LOCALLY DETECTED OPEN LOOPS / UNFINISHED:`,
     loopBlock,
@@ -828,7 +826,8 @@ async function generateReport() {
     return;
   }
   const month = $('#target-month').value || prevMonthStr();
-  const lookback = clampInt($('#lookback-days').value, 0, 60, 14);
+  const reqStart = $('#range-start').value || monthFirstDay(month);
+  const reqEnd = $('#range-end').value || monthLastDay(month);
   const provider = activeProvider();
   const btn = $('#btn-generate');
   btn.disabled = true;
@@ -836,9 +835,9 @@ async function generateReport() {
   try {
     const md = await githubFetchNotes();
     const entries = parseEntries(md);
-    const slice = sliceForMonth(entries, month, lookback);
+    const slice = sliceForRange(entries, reqStart, reqEnd);
     if (!slice.length) {
-      throw new Error(`No entries found for ${month} (+${lookback}d look-back) in ${cfg().notesPath}.`);
+      throw new Error(`No entries found for ${reqStart} → ${reqEnd} in ${cfg().notesPath}.`);
     }
     showProgress(true, 'Analyzing themes…');
     const joined = slice.map((e) => e.body).join('\n');
@@ -870,7 +869,8 @@ async function generateReport() {
       model: gen.model,
       modelAuto: !!picked.auto,
       entryCount: slice.length,
-      lookbackDays: lookback,
+      requestedStart: reqStart, // date range the user asked for
+      requestedEnd: reqEnd,
       rangeStart,               // first entry date actually included
       rangeEnd,                 // last entry date actually included
       themeSummary: themes.length ? themes.slice(0, 4).map((t) => t.label).join(', ') : 'none detected',
@@ -1061,6 +1061,20 @@ function prevMonthStr() {
   const n = new Date();
   const d = new Date(n.getFullYear(), n.getMonth() - 1, 1);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+}
+function monthFirstDay(monthStr) {
+  return `${monthStr}-01`;
+}
+function monthLastDay(monthStr) {
+  const [y, m] = monthStr.split('-').map(Number);
+  const last = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  return `${monthStr}-${String(last).padStart(2, '0')}`;
+}
+// Reset the date range to span the whole selected month.
+function syncRangeToMonth() {
+  const month = $('#target-month').value || prevMonthStr();
+  $('#range-start').value = monthFirstDay(month);
+  $('#range-end').value = monthLastDay(month);
 }
 function fmtDate(iso) {
   if (!iso) return '';
@@ -1388,6 +1402,7 @@ function init() {
 
   // Defaults for controls.
   $('#target-month').value = prevMonthStr();
+  syncRangeToMonth();
   fillSettings();
   bindSettingsInputs();
   bindReveal();
@@ -1406,6 +1421,7 @@ function init() {
   $$('[data-open-settings]').forEach((el) => el.addEventListener('click', openSettings));
 
   // Generate + report actions.
+  $('#target-month').addEventListener('change', syncRangeToMonth);
   $('#btn-generate').addEventListener('click', generateReport);
   $('#btn-copy').addEventListener('click', copyCurrentReport);
   $('#btn-download').addEventListener('click', downloadCurrentReport);
