@@ -64,6 +64,7 @@
         <button id="btn-sync" class="btn btn-ghost" title="Pull &amp; push the private Gist">
           <span class="ico">&#8635;</span><span class="btn-label">Cloud Sync</span>
         </button>
+        <button id="btn-ledger" class="btn btn-icon" title="Claims ledger">&#9878;</button>
         <button id="btn-theme" class="btn btn-icon" title="Toggle light / dark">&#9681;</button>
         <button id="btn-settings" class="btn btn-icon" title="Settings">&#9881;</button>
       </div>
@@ -314,6 +315,32 @@
       <div class="modal-foot">
         <span id="settings-saved" class="muted tiny">changes auto-save</span>
         <button class="btn btn-primary" data-close-settings>Done</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- =========================== CLAIMS LEDGER ========================= -->
+  <!-- Forecasts score calibration, commitments score follow-through. Every row
+       carries the verbatim journal line it came from; nothing scores until the
+       verdict is confirmed by hand. -->
+  <div id="ledger-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="ledger-title">
+    <div class="modal-backdrop" data-close-ledger></div>
+    <div class="modal-card modal-wide">
+      <div class="modal-head">
+        <h2 id="ledger-title">Claims ledger</h2>
+        <button class="btn btn-icon" data-close-ledger title="Close">&times;</button>
+      </div>
+
+      <div class="ledger-bar">
+        <button type="button" id="btn-extract" class="btn btn-primary">Extract from journal</button>
+        <span id="ledger-status" class="ledger-status muted"></span>
+      </div>
+
+      <div class="modal-body" id="ledger-body"></div>
+
+      <div class="modal-foot">
+        <span class="muted ledger-foot-note">Stored in the private Gist. The journal is never written to.</span>
+        <button class="btn btn-primary" data-close-ledger>Done</button>
       </div>
     </div>
   </div>
