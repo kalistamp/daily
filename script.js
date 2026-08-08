@@ -120,7 +120,15 @@ const state = {
 };
 
 function emptyData() {
-  return { app: 'monthly-self-interrogation', version: 1, updatedAt: null, reports: [] };
+  return { app: 'monthly-self-interrogation', version: 1, updatedAt: null, reports: [], claims: [] };
+}
+// Gists written before a collection existed come back without it. Normalize on
+// every load path so nothing downstream has to null-check the arrays.
+function normalizeData(d) {
+  const out = d && typeof d === 'object' ? d : emptyData();
+  if (!Array.isArray(out.reports)) out.reports = [];
+  if (!Array.isArray(out.claims)) out.claims = [];
+  return out;
 }
 
 /* -------------------------------------------------------------- DOM helper */
@@ -226,9 +234,7 @@ async function gistPull() {
   let content = file.content;
   if (file.truncated && file.raw_url) content = await (await fetch(file.raw_url)).text();
   try {
-    const parsed = JSON.parse(content);
-    if (!parsed.reports) parsed.reports = [];
-    return parsed;
+    return normalizeData(JSON.parse(content));
   } catch {
     // File exists but isn't our JSON yet — start fresh (won't clobber until push).
     return emptyData();
@@ -1160,6 +1166,403 @@ function toggleTheme() {
   applyTheme(cur === 'dark' ? 'light' : 'dark');
 }
 
+/* ========================================================== claims ledger */
+/* ----------------------------------------------------------------------------
+   CLAIMS LEDGER
+   ----------------------------------------------------------------------------
+   Two kinds of falsifiable statement get mined out of the journal:
+     forecast   — a claim about the world     ("nobody's going to use that")
+     commitment — a claim about their own act ("going to ship the adapter")
+   Forecasts score calibration; commitments score follow-through. Commitments
+   are far denser in this journal and settle in days rather than quarters,
+   which is what makes the ledger useful long before a calibration curve has
+   enough points to mean anything.
+
+   THREE RULES ENFORCED HERE IN CODE, NOT LEFT TO THE PROMPT:
+     1. Every claim and every resolution must carry a quote that actually
+        occurs in the entry it names; quoteIsReal() drops the rest. A model
+        asked "did this come true?" against a journal with 20-day gaps will
+        confabulate — a quote that has to survive a substring check cannot.
+     2. A model verdict lands as `proposed` and scores nothing until the user
+        confirms it. Silence in the journal is not evidence of anything.
+     3. All arithmetic happens here. The model never computes a number.
+--------------------------------------------------------------------------- */
+
+const CLAIM_VERDICTS = ['right', 'wrong', 'partial'];
+const isSettled = (c) => CLAIM_VERDICTS.includes(c.status);
+// Resolved forecasts needed before the panel will talk about calibration. Below
+// this it reports counts only: a Brier score off four predictions is noise
+// wearing a decimal point.
+const CALIBRATION_MIN = 10;
+
+const todayStr = () => new Date().toISOString().slice(0, 10);
+const normQuote = (q) => (q || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+const claimKey = (c) => `${c.sourceDate}|${normQuote(c.quote)}`;
+function claimList() { return (state.data.claims = state.data.claims || []); }
+
+/* --------------------------------------------------------------- prompts */
+function buildLedgerSystemPrompt() {
+  return [
+    'You extract falsifiable claims from a private journal, and judge earlier claims against later entries.',
+    'Output ONE JSON object and nothing else — no prose, no code fence, no explanation.',
+    '',
+    'Shape:',
+    '{"claims":[{"type":"forecast|commitment","text":"","quote":"","sourceDate":"YYYY-MM-DD","dueDate":"YYYY-MM-DD or null","confidence":0.7,"domain":"","resolved":null}],',
+    ' "resolutions":[{"id":"","verdict":"right|wrong|partial","evidence":"","evidenceDate":"YYYY-MM-DD"}]}',
+    '',
+    'CLAIMS — only statements that can later be judged true or false.',
+    '- type "forecast": a claim about the world or about other people — "nobody will use that", "this breaks by Q3".',
+    '- type "commitment": a claim about their own future action — "going to ship the adapter", "plan to cut caffeine".',
+    '- quote MUST be copied verbatim from an entry, character for character. if you cannot quote it, do not emit it.',
+    '- sourceDate is the date heading of the entry the quote came from.',
+    '- dueDate: when it becomes judgeable. use their stated deadline; if none, estimate a conservative one. null only if genuinely open-ended.',
+    '- confidence: how sure THEY sounded, not how sure you are. "no way" 0.05, "doubt it" 0.2, "might" 0.4, "probably" 0.7, "definitely" 0.95, flat unhedged statement 0.8.',
+    '- domain: one short lowercase tag — ai, cyber, health, career, privacy, life.',
+    '- skip pure logging ("went to the gym"), questions, and vague wishes with no testable outcome.',
+    '- "resolved": if a LATER entry already settles a claim you are extracting right now, attach {"verdict":"","evidence":"","evidenceDate":""} here. otherwise null. the same evidence rules below apply.',
+    '',
+    'RESOLUTIONS — judge the OPEN CLAIMS listed in the user message against the entries.',
+    '- resolve only when a later entry gives real evidence. evidence MUST be a verbatim quote, evidenceDate its entry date.',
+    '- "right" it happened as claimed. "wrong" it did not. "partial" it happened late, partially, or in altered form.',
+    '- silence is NOT evidence. if nothing in the entries speaks to a claim, leave it out. omitting is always the correct move when unsure.',
+    '- never resolve a claim using the entry the claim came from.',
+    '- reuse the id exactly as given.',
+  ].join('\n');
+}
+
+function buildLedgerUserPrompt(entries, openClaims, today) {
+  const body = entries.map((e) => `### ${e.date}\n${e.body}`).join('\n\n');
+  const open = openClaims.length
+    ? openClaims.map((c) => `- id=${c.id} [${c.type}] from ${c.sourceDate}, due ${c.dueDate || 'open-ended'} — ${c.text}`).join('\n')
+    : '- (none yet)';
+  return [
+    `TODAY: ${today}`,
+    '',
+    '=== OPEN CLAIMS (judge these; omit any without real evidence) ===',
+    open,
+    '=== END OPEN CLAIMS ===',
+    '',
+    '=== JOURNAL ENTRIES ===',
+    body || '(no entries found)',
+    '=== END ENTRIES ===',
+  ].join('\n');
+}
+
+/* ------------------------------------------------------------- ingestion */
+function parseJsonLoose(text) {
+  let t = (text || '').trim();
+  const fence = t.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fence) t = fence[1].trim();
+  const s = t.indexOf('{'), e = t.lastIndexOf('}');
+  if (s === -1 || e <= s) throw new Error('The model returned prose instead of JSON. Try again, or pick a different model in Settings.');
+  return JSON.parse(t.slice(s, e + 1));
+}
+
+// A quote the journal does not contain is a fabrication however plausible it
+// reads. Compared on normalized text so punctuation drift doesn't false-reject;
+// the length floor stops a two-word "quote" from matching half the file.
+function quoteIsReal(byDate, dateStr, quote) {
+  const e = byDate[dateStr];
+  const q = normQuote(quote);
+  return !!e && q.length >= 12 && normQuote(e.body).includes(q);
+}
+
+function clampConf(v) {
+  // A MISSING confidence must land on 0.5, not 0. Number(null) is 0, which
+  // would silently record "they were 1% sure" and poison the Brier score.
+  if (v === null || v === undefined || v === '') return 0.5;
+  const n = Number(v);
+  if (!isFinite(n)) return 0.5;
+  return Math.max(0.01, Math.min(0.99, n > 1 ? n / 100 : n));
+}
+
+// A claim can arrive already settled. On a backfill pass every claim is new,
+// so nothing would be resolvable via the id-keyed `resolutions` list — the
+// first run would return an empty scoreboard and demand a second click.
+function attachInlineResolution(c, raw, byDate) {
+  const r = raw && raw.resolved;
+  if (!r || !CLAIM_VERDICTS.includes(r.verdict)) return false;
+  const evidence = String(r.evidence || '').trim();
+  const evidenceDate = String(r.evidenceDate || '').trim();
+  if (!evidence || evidenceDate === c.sourceDate) return false;
+  if (!quoteIsReal(byDate, evidenceDate, evidence)) return false;
+  Object.assign(c, { status: 'proposed', proposedVerdict: r.verdict, evidence: evidence.slice(0, 400), evidenceDate });
+  return true;
+}
+
+function mergeClaims(incoming, byDate) {
+  const list = claimList();
+  const seen = new Set(list.map(claimKey));
+  let added = 0, dropped = 0, proposed = 0;
+  for (const raw of Array.isArray(incoming) ? incoming : []) {
+    const type = raw && raw.type;
+    if (type !== 'forecast' && type !== 'commitment') { dropped++; continue; }
+    const c = {
+      id: 'c-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7),
+      type,
+      text: String(raw.text || '').trim().slice(0, 300),
+      quote: String(raw.quote || '').trim().slice(0, 400),
+      sourceDate: String(raw.sourceDate || '').trim(),
+      dueDate: /^\d{4}-\d{2}-\d{2}$/.test(raw.dueDate || '') ? raw.dueDate : null,
+      confidence: clampConf(raw.confidence),
+      domain: String(raw.domain || '').trim().toLowerCase().slice(0, 16),
+      status: 'open',
+      evidence: '', evidenceDate: null, proposedVerdict: null,
+      resolvedAt: null, extractedAt: new Date().toISOString(),
+    };
+    if (!c.text || !c.quote || !c.sourceDate) { dropped++; continue; }
+    if (!quoteIsReal(byDate, c.sourceDate, c.quote)) { dropped++; continue; }
+    if (seen.has(claimKey(c))) continue;          // already in the ledger
+    if (attachInlineResolution(c, raw, byDate)) proposed++;
+    seen.add(claimKey(c));
+    list.push(c);
+    added++;
+  }
+  return { added, dropped, proposed };
+}
+
+function applyProposals(incoming, byDate) {
+  const byId = new Map(claimList().map((c) => [c.id, c]));
+  let proposed = 0, dropped = 0;
+  for (const r of Array.isArray(incoming) ? incoming : []) {
+    const c = byId.get(String((r && r.id) || '').trim());
+    if (!c || c.status !== 'open') continue;
+    const verdict = CLAIM_VERDICTS.includes(r.verdict) ? r.verdict : null;
+    const evidence = String(r.evidence || '').trim();
+    const evidenceDate = String(r.evidenceDate || '').trim();
+    if (!verdict || !evidence) { dropped++; continue; }
+    // A claim cannot be its own evidence, and the evidence has to exist.
+    if (evidenceDate === c.sourceDate) { dropped++; continue; }
+    if (!quoteIsReal(byDate, evidenceDate, evidence)) { dropped++; continue; }
+    c.status = 'proposed';
+    c.proposedVerdict = verdict;
+    c.evidence = evidence.slice(0, 400);
+    c.evidenceDate = evidenceDate;
+    proposed++;
+  }
+  return { proposed, dropped };
+}
+
+/* ------------------------------------------------------------ statistics */
+// Deterministic. Partial credit counts as half, for both scoreboards.
+function claimScore(c) { return c.status === 'right' ? 1 : c.status === 'partial' ? 0.5 : 0; }
+// True median: on an even count, average the middle pair rather than taking
+// the upper one (which reads as worse slip than actually happened).
+function median(sorted) {
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[mid] : Math.round((sorted[mid - 1] + sorted[mid]) / 2);
+}
+
+function ledgerStats(list) {
+  const settled = list.filter(isSettled);
+  const f = settled.filter((c) => c.type === 'forecast');
+  const m = settled.filter((c) => c.type === 'commitment');
+  const mean = (a, fn) => (a.length ? a.reduce((s, x) => s + fn(x), 0) / a.length : null);
+
+  const buckets = [[0, 0.2], [0.2, 0.4], [0.4, 0.6], [0.6, 0.8], [0.8, 1.01]]
+    .map(([lo, hi]) => {
+      const inB = f.filter((c) => c.confidence >= lo && c.confidence < hi);
+      return { lo, hi, n: inB.length, stated: mean(inB, (c) => c.confidence), actual: mean(inB, claimScore) };
+    })
+    .filter((b) => b.n);
+
+  // Slip is only meaningful where both a deadline and a dated outcome exist.
+  const slips = m
+    .filter((c) => c.dueDate && c.evidenceDate)
+    .map((c) => Math.round((new Date(c.evidenceDate + 'T00:00:00Z') - new Date(c.dueDate + 'T00:00:00Z')) / 864e5))
+    .sort((a, b) => a - b);
+
+  return {
+    open: list.filter((c) => c.status === 'open').length,
+    proposed: list.filter((c) => c.status === 'proposed').length,
+    voided: list.filter((c) => c.status === 'void').length,
+    forecastN: f.length,
+    commitN: m.length,
+    hit: mean(f, claimScore),
+    brier: mean(f, (c) => Math.pow(c.confidence - claimScore(c), 2)),
+    follow: mean(m, claimScore),
+    buckets,
+    medianSlip: slips.length ? median(slips) : null,
+    calibrated: f.length >= CALIBRATION_MIN,
+  };
+}
+
+/* ---------------------------------------------------------------- actions */
+function setLedgerStatus(text) {
+  const el = $('#ledger-status');
+  if (el) el.textContent = text || '';
+}
+function persistLedger() {
+  localStorage.setItem(LS.gistCache, JSON.stringify(state.data));
+  scheduleGistPush();
+}
+
+async function extractClaims() {
+  const miss = missingSecrets();
+  if (miss.length) {
+    toast('Missing keys: ' + miss.join(', ') + '. Opening Settings.', 'err');
+    openSettings();
+    return;
+  }
+  const btn = $('#btn-extract');
+  btn.disabled = true;
+  try {
+    setLedgerStatus('Fetching journal…');
+    const entries = parseEntries(await githubFetchNotes());
+    if (!entries.length) throw new Error(`No dated entries found in ${cfg().notesPath}.`);
+    const byDate = {};
+    for (const e of entries) byDate[e.date] = e;
+
+    // The whole journal, not a month: January's claims are settled by July's
+    // entries, so a month-scoped pass would leave nearly everything open.
+    const open = claimList().filter((c) => c.status === 'open');
+    const provider = activeProvider();
+    const picked = await resolveModel(provider, setLedgerStatus);
+    setLedgerStatus(`Reading ${entries.length} entries with ${picked.model}…`);
+    const gen = await providerGenerate(
+      provider, picked.model, buildLedgerSystemPrompt(),
+      buildLedgerUserPrompt(entries, open, todayStr()),
+      (m, fb) => setLedgerStatus(`${fb ? 'Falling back to' : 'Reading with'} ${m}…`)
+    );
+
+    const out = parseJsonLoose(gen.text);
+    const merged = mergeClaims(out.claims, byDate);
+    const applied = applyProposals(out.resolutions, byDate);
+    persistLedger();
+    renderLedger();
+
+    const dropped = merged.dropped + applied.dropped;
+    const toJudge = merged.proposed + applied.proposed;
+    toast(
+      `${merged.added} new · ${toJudge} to judge` +
+      (dropped ? ` · ${dropped} rejected (no matching quote)` : ''),
+      'ok'
+    );
+    setLedgerStatus('');
+  } catch (e) {
+    setLedgerStatus('');
+    toast(e.message, 'err');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function setVerdict(id, verdict) {
+  const c = claimList().find((x) => x.id === id);
+  if (!c) return;
+  if (verdict === 'open') {
+    Object.assign(c, { status: 'open', proposedVerdict: null, evidence: '', evidenceDate: null, resolvedAt: null });
+  } else if (verdict === 'void') {
+    Object.assign(c, { status: 'void', resolvedAt: new Date().toISOString() });
+  } else if (CLAIM_VERDICTS.includes(verdict)) {
+    Object.assign(c, { status: verdict, resolvedAt: new Date().toISOString() });
+  }
+  persistLedger();
+  renderLedger();
+}
+
+/* ----------------------------------------------------------------- render */
+const pct = (v) => (v === null ? '—' : Math.round(v * 100) + '%');
+
+function claimRow(c) {
+  const conf = Math.round(c.confidence * 100) + '%';
+  const due = c.dueDate ? ` · due ${fmtDay(c.dueDate)}` : '';
+  const overdue = c.status === 'open' && c.dueDate && c.dueDate < todayStr();
+  const ev = c.evidence
+    ? `<div class="claim-ev"><span class="ev-date">${fmtDay(c.evidenceDate)}</span>${escapeHtml(c.evidence)}</div>`
+    : '';
+  const actions = c.status === 'proposed'
+    ? `<div class="claim-actions">
+         <span class="muted">model says <strong>${c.proposedVerdict}</strong> —</span>
+         <button class="btn btn-mini ok" data-claim="${c.id}" data-verdict="${c.proposedVerdict}">accept</button>
+         <button class="btn btn-mini" data-claim="${c.id}" data-verdict="${c.proposedVerdict === 'right' ? 'wrong' : 'right'}">no, ${c.proposedVerdict === 'right' ? 'wrong' : 'right'}</button>
+         <button class="btn btn-mini" data-claim="${c.id}" data-verdict="partial">partial</button>
+         <button class="btn btn-mini" data-claim="${c.id}" data-verdict="open">reject</button>
+       </div>`
+    : c.status === 'open'
+      ? `<div class="claim-actions">
+           <button class="btn btn-mini ok" data-claim="${c.id}" data-verdict="right">right</button>
+           <button class="btn btn-mini" data-claim="${c.id}" data-verdict="wrong">wrong</button>
+           <button class="btn btn-mini" data-claim="${c.id}" data-verdict="partial">partial</button>
+           <button class="btn btn-mini" data-claim="${c.id}" data-verdict="void">not a claim</button>
+         </div>`
+      : `<div class="claim-actions">
+           <span class="verdict v-${c.status}">${c.status}</span>
+           <button class="btn btn-mini" data-claim="${c.id}" data-verdict="open">reopen</button>
+         </div>`;
+  return `<li class="claim s-${c.status}${overdue ? ' overdue' : ''}">
+    <div class="claim-top">
+      <span class="claim-type t-${c.type}">${c.type}</span>
+      <span class="claim-conf" title="how sure they sounded">${conf}</span>
+      ${c.domain ? `<span class="claim-domain">${escapeHtml(c.domain)}</span>` : ''}
+      <span class="claim-when">${fmtDay(c.sourceDate)}${due}${overdue ? ' · overdue' : ''}</span>
+    </div>
+    <p class="claim-text">${escapeHtml(c.text)}</p>
+    <blockquote class="claim-quote">${escapeHtml(c.quote)}</blockquote>
+    ${ev}
+    ${actions}
+  </li>`;
+}
+
+function statsBlock(s) {
+  const cal = s.calibrated
+    ? `<div class="stat"><span class="stat-n">${s.brier.toFixed(2)}</span><span class="stat-l">Brier score</span></div>` +
+      s.buckets.map((b) => {
+        const gap = b.stated - b.actual;
+        const verdict = Math.abs(gap) < 0.1 ? 'calibrated' : gap > 0 ? 'overconfident' : 'underconfident';
+        return `<div class="bucket"><span>${Math.round(b.lo * 100)}–${Math.round(Math.min(b.hi, 1) * 100)}%</span>
+          <span class="muted">said ${pct(b.stated)}, hit ${pct(b.actual)} (n=${b.n})</span>
+          <span class="bucket-v v-${verdict}">${verdict}</span></div>`;
+      }).join('')
+    : `<p class="muted cal-gate">Calibration needs ${CALIBRATION_MIN} settled forecasts to say anything honest — ${s.forecastN} so far. Counts only until then.</p>`;
+
+  return `<div class="ledger-stats">
+    <div class="stat-row">
+      <div class="stat"><span class="stat-n">${pct(s.follow)}</span><span class="stat-l">follow-through<br><em>${s.commitN} commitments</em></span></div>
+      <div class="stat"><span class="stat-n">${pct(s.hit)}</span><span class="stat-l">forecast hit rate<br><em>${s.forecastN} settled</em></span></div>
+      <div class="stat"><span class="stat-n">${s.medianSlip === null ? '—' : (s.medianSlip > 0 ? '+' : '') + s.medianSlip + 'd'}</span><span class="stat-l">median slip<br><em>vs own deadline</em></span></div>
+      <div class="stat"><span class="stat-n">${s.open}</span><span class="stat-l">open<br><em>${s.proposed} to judge</em></span></div>
+    </div>
+    ${cal}
+  </div>`;
+}
+
+function renderLedger() {
+  const list = claimList();
+  const s = ledgerStats(list);
+  const body = $('#ledger-body');
+  if (!body) return;
+
+  if (!list.length) {
+    body.innerHTML = statsBlock(s) +
+      `<p class="ledger-empty muted">No claims yet. <strong>Extract from journal</strong> reads the whole file at once —
+       claims made in January are often already settled by entries from July, so the first pass usually returns
+       settled rows, not an empty table.</p>`;
+    return;
+  }
+
+  const proposed = list.filter((c) => c.status === 'proposed');
+  const open = list.filter((c) => c.status === 'open')
+    .sort((a, b) => (a.dueDate || '9999').localeCompare(b.dueDate || '9999'));
+  const settled = list.filter((c) => isSettled(c) || c.status === 'void')
+    .sort((a, b) => (b.resolvedAt || '').localeCompare(a.resolvedAt || ''));
+
+  const group = (title, arr, cls = '') => arr.length
+    ? `<h3 class="ledger-group ${cls}">${title} <span class="muted">${arr.length}</span></h3><ul class="claim-list">${arr.map(claimRow).join('')}</ul>`
+    : '';
+
+  body.innerHTML = statsBlock(s) +
+    group('Needs your call', proposed, 'is-hot') +
+    group('Open', open) +
+    group('Settled', settled.slice(0, 30));
+}
+
+function openLedger() {
+  $('#ledger-modal').classList.remove('hidden');
+  renderLedger();
+}
+function closeLedger() { $('#ledger-modal').classList.add('hidden'); }
+
 /* =============================================================== toasts */
 function toast(msg, kind = '') {
   const wrap = $('#toasts');
@@ -1443,7 +1846,7 @@ function init() {
   // Restore cached Gist data for instant offline view.
   try {
     const cached = localStorage.getItem(LS.gistCache);
-    if (cached) state.data = JSON.parse(cached);
+    if (cached) state.data = normalizeData(JSON.parse(cached));
   } catch { /* ignore */ }
 
   // Defaults for controls.
@@ -1466,6 +1869,16 @@ function init() {
   $$('[data-close-settings]').forEach((el) => el.addEventListener('click', closeSettings));
   $$('[data-open-settings]').forEach((el) => el.addEventListener('click', openSettings));
 
+  // Claims ledger. Verdict buttons are delegated — rows are re-rendered on
+  // every change, so per-button listeners would be rebound constantly.
+  $('#btn-ledger').addEventListener('click', openLedger);
+  $$('[data-close-ledger]').forEach((el) => el.addEventListener('click', closeLedger));
+  $('#btn-extract').addEventListener('click', extractClaims);
+  $('#ledger-body').addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-claim]');
+    if (btn) setVerdict(btn.dataset.claim, btn.dataset.verdict);
+  });
+
   // Generate + report actions.
   $('#target-month').addEventListener('change', syncRangeToMonth);
   $('#btn-generate').addEventListener('click', generateReport);
@@ -1478,8 +1891,8 @@ function init() {
   $('#btn-refresh-models').addEventListener('click', refreshModels);
   $('#btn-test').addEventListener('click', testConnections);
 
-  // Esc closes settings.
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeSettings(); });
+  // Esc closes whichever modal is open.
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeSettings(); closeLedger(); } });
 
   // Password gate.
   if (isLocked()) {
