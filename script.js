@@ -38,6 +38,7 @@ const LS = {
   passHash:       'msi.passHash',
   gistCache:      'msi.gistCache',
   lastId:         'msi.lastId',
+  dirty:          'msi.dirty',
 };
 // Gist ID pre-filled from the private gist provided by the user.
 // NOTE on the *Model defaults: blank means "Auto" — resolved against the live
@@ -117,10 +118,12 @@ const state = {
   reflectionTimer: null,
   pushInFlight: null,
   models: null,
+  dirty: false,   // local edits not yet in the Gist
+  rev: 0,         // bumped on every local edit; guards the dirty-flag clear
 };
 
 function emptyData() {
-  return { app: 'monthly-self-interrogation', version: 1, updatedAt: null, reports: [], claims: [] };
+  return { app: 'monthly-self-interrogation', version: 1, updatedAt: null, reports: [], claims: [], deleted: [] };
 }
 // Gists written before a collection existed come back without it. Normalize on
 // every load path so nothing downstream has to null-check the arrays.
@@ -128,7 +131,93 @@ function normalizeData(d) {
   const out = d && typeof d === 'object' ? d : emptyData();
   if (!Array.isArray(out.reports)) out.reports = [];
   if (!Array.isArray(out.claims)) out.claims = [];
+  if (!Array.isArray(out.deleted)) out.deleted = [];
   return out;
+}
+
+/* ------------------------------------------------------------ local saves */
+// Every local mutation goes through here. The dirty flag is persisted, not just
+// held in memory: a device that generates a report and is closed before the
+// push lands must still know, on next open, that it owes the Gist a write.
+function saveLocal() {
+  state.rev++;
+  state.dirty = true;
+  localStorage.setItem(LS.dirty, '1');
+  localStorage.setItem(LS.gistCache, JSON.stringify(state.data));
+}
+function clearDirty(atRev) {
+  if (atRev !== undefined && atRev !== state.rev) return;  // edited mid-push
+  state.dirty = false;
+  localStorage.removeItem(LS.dirty);
+}
+
+/* ------------------------------------------------------------------ merge */
+/* ---------------------------------------------------------------------------
+   WHY THIS EXISTS
+   ---------------------------------------------------------------------------
+   The Gist is one JSON blob and the API only offers whole-file PATCH — there is
+   no per-field write and no If-Match. So a plain "PATCH my local copy" is a
+   last-writer-wins overwrite: a phone writes 5 reports, the laptop opens with a
+   day-old cache, pushes it, and those 5 reports are gone. That is exactly what
+   happened. Every push now merges against a fresh pull instead of replacing.
+
+   Merge is a union keyed by id, so neither device can delete the other's work
+   by simply not knowing about it. Deletion therefore has to be explicit — an id
+   in `deleted` — otherwise a union would resurrect every deleted report from
+   whichever device still had it cached.
+--------------------------------------------------------------------------- */
+const newer = (a, b) => ((a || '') > (b || '') ? a : b);
+// Last-touched stamp for a record: whichever side edited it most recently wins.
+const reportStamp = (r) => newer(r.reflectionUpdatedAt, r.generatedAt) || '';
+// Claims compare on judgement state FIRST, then time. Two devices that both
+// extracted a claim carry the same extractedAt, so a pure timestamp compare
+// ties — and a tie must not throw away the side where the user actually ruled
+// on it. Rank is one leading digit, so plain string ordering does both.
+const claimRank  = (c) => (isSettled(c) || c.status === 'void' ? 2 : c.status === 'proposed' ? 1 : 0);
+const claimStamp = (c) => `${claimRank(c)}|${c.resolvedAt || c.extractedAt || ''}`;
+
+function mergeById(a, b, stampOf, dedupeKey) {
+  const byId = new Map();
+  for (const rec of [...a, ...b]) {
+    if (!rec || !rec.id) continue;
+    const prev = byId.get(rec.id);
+    if (!prev || stampOf(rec) > stampOf(prev)) byId.set(rec.id, rec);
+  }
+  if (!dedupeKey) return [...byId.values()];
+  // Two devices extracting the same claim independently mint different ids, so
+  // an id-keyed union alone would double every claim. Collapse on the natural
+  // key too, keeping the one that carries a verdict (or the newer one).
+  const byKey = new Map();
+  for (const rec of byId.values()) {
+    const k = dedupeKey(rec);
+    const prev = byKey.get(k);
+    if (!prev || stampOf(rec) > stampOf(prev)) byKey.set(k, rec);
+  }
+  return [...byKey.values()];
+}
+
+// Every record id in one dataset — used to tell "the merge added something the
+// remote does not have" from "the remote already had it all".
+function idSet(d) {
+  const n = normalizeData(d);
+  return new Set([...n.reports, ...n.claims, ...n.deleted].map((x) => x.id));
+}
+
+function mergeData(local, remote) {
+  const l = normalizeData(local), r = normalizeData(remote);
+  const deleted = mergeById(l.deleted, r.deleted, (d) => d.at || '');
+  const gone = new Set(deleted.map((d) => d.id));
+  return {
+    app: l.app || r.app,
+    version: l.version || r.version,
+    updatedAt: newer(l.updatedAt, r.updatedAt),
+    reports: mergeById(l.reports, r.reports, reportStamp)
+      .filter((x) => !gone.has(x.id))
+      .sort((x, y) => (y.generatedAt || '').localeCompare(x.generatedAt || '')),
+    claims: mergeById(l.claims, r.claims, claimStamp, claimKey)
+      .filter((x) => !gone.has(x.id)),
+    deleted,
+  };
 }
 
 /* -------------------------------------------------------------- DOM helper */
@@ -241,8 +330,14 @@ async function gistPull() {
   }
 }
 
+// READ-MERGE-WRITE. Never PATCHes the local copy straight over the remote: the
+// Gist API replaces the whole file, so a blind write silently deletes anything
+// another device added since this one last pulled. Pull first, merge, then push
+// the union. A failed pull aborts the push — better unsynced than overwritten.
 async function gistPushNow() {
   const { gistId } = cfg();
+  const atRev = state.rev;
+  state.data = mergeData(state.data, await gistPull());
   state.data.updatedAt = new Date().toISOString();
   const body = { files: { [GIST_FILE]: { content: JSON.stringify(state.data, null, 2) } } };
   const res = await fetch(`https://api.github.com/gists/${encodeURIComponent(gistId)}`, {
@@ -253,6 +348,7 @@ async function gistPushNow() {
     throw new Error(e.message || `Gist write failed (${res.status}). Token needs Gists:write.`);
   }
   localStorage.setItem(LS.gistCache, JSON.stringify(state.data));
+  clearDirty(atRev);
 }
 
 /* ============================================================== providers */
@@ -826,6 +922,7 @@ function scheduleGistPush() {
 }
 async function flushGistPush() {
   clearTimeout(state.pushTimer);
+  if (!state.dirty) { setSync('synced', 'synced'); return; }
   if (state.pushInFlight) return state.pushInFlight;
   setSync('busy', 'syncing…');
   state.pushInFlight = (async () => {
@@ -844,9 +941,21 @@ async function cloudSync() {
   }
   setSync('busy', 'syncing…');
   try {
-    await flushGistPush();                 // push any pending local edits first
-    state.data = await gistPull();          // then pull remote truth
+    await flushGistPush();                  // push pending local edits (merging)
+    setSync('busy', 'syncing…');
+    // Then reconcile with the remote. NOT an assignment: `state.data = pull()`
+    // discards anything this device holds that the Gist has not seen yet, which
+    // on a failed/absent push is silent local data loss. Merge keeps both sides.
+    const remote = await gistPull();
+    state.data = mergeData(state.data, remote);
     localStorage.setItem(LS.gistCache, JSON.stringify(state.data));
+    // If this device turned out to be holding records the Gist lacks — a push
+    // that failed earlier, a cleared dirty flag — the merge just recovered them
+    // locally. Send them up, or they stay stranded on this device forever.
+    if (idSet(state.data).size > idSet(remote).size) {
+      saveLocal();
+      await flushGistPush();
+    }
     renderHistory();
     if (state.currentId && !state.data.reports.find((r) => r.id === state.currentId)) {
       state.currentId = null; showEmpty();
@@ -933,7 +1042,7 @@ async function generateReport() {
     };
 
     state.data.reports.unshift(report);
-    localStorage.setItem(LS.gistCache, JSON.stringify(state.data));
+    saveLocal();
     showProgress(true, 'Saving to private Gist…');
     await flushGistPushImmediate();
 
@@ -970,7 +1079,11 @@ async function deleteCurrentReport() {
   const ok = await confirmDialog('Delete report', `Delete the ${r.month} report from the Gist? This can't be undone.`);
   if (!ok) return;
   state.data.reports = state.data.reports.filter((x) => x.id !== r.id);
-  localStorage.setItem(LS.gistCache, JSON.stringify(state.data));
+  // Tombstone, not just a local removal: sync is a union now, so a report that
+  // merely vanished from this device would come straight back from any other
+  // device that still had it cached.
+  state.data.deleted.push({ id: r.id, at: new Date().toISOString() });
+  saveLocal();
   state.currentId = null;
   showEmpty();
   renderHistory();
@@ -1016,7 +1129,7 @@ function onReflectionInput() {
   if (!r) return;
   r.reflection = $('#reflection-input').value;
   r.reflectionUpdatedAt = new Date().toISOString();
-  localStorage.setItem(LS.gistCache, JSON.stringify(state.data));
+  saveLocal();
   $('#reflection-status').textContent = 'saving…';
   clearTimeout(state.reflectionTimer);
   state.reflectionTimer = setTimeout(async () => {
@@ -1393,7 +1506,7 @@ function setLedgerStatus(text) {
   if (el) el.textContent = text || '';
 }
 function persistLedger() {
-  localStorage.setItem(LS.gistCache, JSON.stringify(state.data));
+  saveLocal();
   scheduleGistPush();
 }
 
@@ -1843,11 +1956,13 @@ function init() {
   const storedTheme = localStorage.getItem(LS.theme);
   applyTheme(storedTheme || (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'));
 
-  // Restore cached Gist data for instant offline view.
+  // Restore cached Gist data for instant offline view. The cache is a starting
+  // point, never the truth — the sync on open merges it against the Gist.
   try {
     const cached = localStorage.getItem(LS.gistCache);
     if (cached) state.data = normalizeData(JSON.parse(cached));
   } catch { /* ignore */ }
+  state.dirty = localStorage.getItem(LS.dirty) === '1';
 
   // Defaults for controls.
   $('#target-month').value = prevMonthStr();
