@@ -97,6 +97,19 @@ convenience gate only (SHA-256 compare in the browser) — **not** encryption, s
 the secrets already live in localStorage. It just stops casual over-the-shoulder
 access.
 
+## Using more than one device
+
+Phone and laptop can both generate reports. Sync **merges**; it does not
+overwrite. Every push pulls the Gist first and writes the union of both sides,
+so a device opening with a stale cache can no longer wipe out reports another
+device made in the meantime. Per report, the most recently edited copy wins
+(that's what keeps reflections from going backwards), and deleting a report
+records a tombstone so it stays deleted instead of returning from the other
+device's cache.
+
+If a device is offline when you generate a report, it remembers it still owes
+the Gist a write and pushes on the next open.
+
 ## Notes
 
 - Everything is stored in your browser + your private Gist. Clearing browser data
