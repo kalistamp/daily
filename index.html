@@ -360,6 +360,9 @@
 
   <div id="toasts" class="toasts" aria-live="polite"></div>
 
-  <script src="script.js"></script>
+  <!-- Version query busts the browser cache. Sync correctness now depends on
+       every device running the SAME script: a device still serving a cached
+       pre-merge copy would keep overwriting the Gist. Bump on sync changes. -->
+  <script src="script.js?v=2"></script>
 </body>
 </html>
