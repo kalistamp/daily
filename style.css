@@ -349,6 +349,49 @@ input[type="month"], input[type="number"] { font-family: var(--mono); }
   min-height: 160px; resize: vertical; line-height: 1.6;
   font-size: 14.5px; background: var(--bg-2);
 }
+.reflection + .reflection { margin-top: 18px; }
+
+/* ------------------------------------------------------- follow-up panel */
+.followup-note { margin: -4px 0 14px; line-height: 1.5; }
+.followup-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 14px; }
+.followup-empty { margin: 0; line-height: 1.6; }
+.followup {
+  border: 1px solid var(--border); border-radius: 10px;
+  padding: 12px 14px; background: var(--bg-2);
+  /* Only the left edge changes on answer, so the row does not reflow when a
+     question is filled in. */
+  border-left: 3px solid var(--border);
+}
+.followup.is-answered { border-left-color: var(--ok); }
+.fu-q { display: flex; gap: 10px; align-items: flex-start; margin-bottom: 9px; }
+.fu-n {
+  flex: none; width: 20px; height: 20px; border-radius: 50%;
+  background: var(--bg-3, var(--surface)); border: 1px solid var(--border);
+  font-size: 11px; line-height: 18px; text-align: center; color: var(--muted);
+}
+.followup.is-answered .fu-n { border-color: var(--ok); color: var(--ok); }
+.fu-qtext { display: flex; flex-direction: column; gap: 4px; font-size: 14px; line-height: 1.5; }
+.fu-theme {
+  align-self: flex-start; font-size: 10.5px; letter-spacing: .04em;
+  text-transform: uppercase; color: var(--muted);
+  border: 1px solid var(--border); border-radius: 5px; padding: 1px 6px;
+}
+.fu-why { font-size: 12px; line-height: 1.45; font-style: italic; }
+.fu-input {
+  width: 100%; min-height: 46px; resize: vertical; line-height: 1.55;
+  font-size: 13.5px; background: var(--surface);
+}
+
+/* ----------------------------------------------------- advice directive */
+.advice-input {
+  width: 100%; min-height: 240px; resize: vertical;
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12.5px; line-height: 1.55; background: var(--bg-2);
+  white-space: pre; overflow-wrap: normal; overflow-x: auto;
+}
+/* Scoped, NOT a global .field-hint override: the other hints are prose with
+   inline <strong>/<a>, and turning them into flex containers rewraps them. */
+.field-hint.hint-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 
 /* --------------------------------------------------------------- modal */
 .modal { position: fixed; inset: 0; z-index: 100; display: flex; align-items: flex-start; justify-content: center; padding: 40px 16px; overflow-y: auto; }
