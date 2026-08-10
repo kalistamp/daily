@@ -9,15 +9,20 @@
     - Only the static files in this `docs/` folder are ever public (via GitHub
       Pages). The parent repository that holds the private daily-journal
       markdown stays 100% PRIVATE.
-    - All persistent data (generated reports + metadata) is stored in a PRIVATE
-      GitHub Gist as JSON. The Gist stays PRIVATE.
-    - Secrets (GitHub token, Gist ID, per-provider API keys, selected provider
+    - All persistent data (generated reports + metadata) is stored as JSON in a
+      SEPARATE PRIVATE REPO. GitHub enforces that access: an unauthenticated
+      read returns 404. This replaced a secret Gist, which had no access
+      control at all -- a gist ID is a bearer credential, and anyone holding it
+      could read everything.
+    - TWO tokens: the journal token is Contents:READ-ONLY, so nothing here can
+      write the journal; the data token is read/write on the data repo ONLY.
+    - Secrets (both tokens, per-provider API keys, selected provider
       + model) live EXCLUSIVELY in this browser's localStorage. They are NEVER
       written into any file in this public `docs/` folder, and never leave the
       browser except in direct HTTPS calls to api.github.com and, for the
       selected provider, api.openai.com / api.anthropic.com / generativelanguage.googleapis.com.
-    - Because the repo and Gist are both private, nobody can read any of your
-      data without YOUR own GitHub token + Gist ID entered on YOUR machine.
+    - Because both repos are private, nobody can read any of your data without
+      YOUR own tokens entered on YOUR machine.
   ============================================================================
 -->
 <html lang="en" data-theme="dark">
@@ -61,7 +66,7 @@
         <div id="sync-status" class="sync-status" title="Cloud sync status">
           <span class="dot"></span><span class="sync-label">not synced</span>
         </div>
-        <button id="btn-sync" class="btn btn-ghost" title="Pull &amp; push the private Gist">
+        <button id="btn-sync" class="btn btn-ghost" title="Pull &amp; push the private data repo">
           <span class="ico">&#8635;</span><span class="btn-label">Cloud Sync</span>
         </button>
         <button id="btn-ledger" class="btn btn-icon" title="Claims ledger">&#9878;</button>
@@ -113,7 +118,7 @@
         </div>
 
         <p class="privacy-note muted">
-          Repo &amp; Gist stay <strong>private</strong>. Only these static
+          Both repos stay <strong>private</strong>. Only these static
           <code>docs/</code> files are public. Secrets live only in this browser.
         </p>
       </aside>
@@ -129,8 +134,8 @@
             pick a month, then generate. Or open a past report from History.
           </p>
           <ul class="checklist" id="setup-checklist">
-            <li data-check="token"><span class="chk"></span> GitHub token</li>
-            <li data-check="gist"><span class="chk"></span> Gist ID</li>
+            <li data-check="token"><span class="chk"></span> Journal token</li>
+            <li data-check="datatoken"><span class="chk"></span> Data token</li>
             <li data-check="apikey"><span class="chk"></span> Provider API key</li>
           </ul>
         </section>
@@ -156,10 +161,23 @@
 
           <article id="report-body" class="report-body markdown"></article>
 
+          <div class="reflection" id="followups">
+            <div class="card-head">
+              <h3 class="card-title">Follow-up questions</h3>
+              <span id="followup-status" class="muted tiny"></span>
+              <button id="btn-followups" class="btn btn-ghost btn-mini" title="Generate more follow-up questions">Ask follow-ups</button>
+            </div>
+            <p class="followup-note muted tiny">
+              Answers are fed into every future report as established fact, so the
+              model stops re-asking what you have already told it.
+            </p>
+            <ul id="followup-list" class="followup-list"></ul>
+          </div>
+
           <div class="reflection">
             <div class="card-head">
               <h3 class="card-title">Your answers &amp; reflections</h3>
-              <span id="reflection-status" class="muted tiny">auto-saves to Gist</span>
+              <span id="reflection-status" class="muted tiny">auto-saves</span>
             </div>
             <textarea id="reflection-input" class="reflection-input"
               placeholder="write your answers here. lowercase, honest, no audience. auto-saved."></textarea>
@@ -188,19 +206,30 @@
             committed to the public <code>docs/</code> folder.
           </p>
 
+          <p class="settings-help muted">
+            Two separate tokens, on purpose. The journal token is
+            <strong>read-only</strong>, so nothing here can modify your journal
+            even by mistake &mdash; GitHub refuses the write. A fine-grained PAT
+            applies one permission set to every repo it covers, so a single
+            token cannot be read-only on one repo and writable on another.
+          </p>
+
           <label class="field">
-            <span class="field-label">GitHub token</span>
+            <span class="field-label">Journal token &mdash; read-only</span>
             <div class="input-reveal">
-              <input type="password" id="set-github-token" placeholder="github_pat_… or ghp_…" autocomplete="off" spellcheck="false" />
+              <input type="password" id="set-github-token" placeholder="github_pat_… (Contents: Read-only)" autocomplete="off" spellcheck="false" />
               <button type="button" class="reveal-btn" data-reveal="set-github-token" title="Show / hide">&#128065;</button>
             </div>
-            <span class="field-hint">Needs repo + gist scope to read notes and read/write the Gist.</span>
+            <span class="field-hint">Contents: <strong>Read-only</strong> on the journal repo. Used only to read your notes.</span>
           </label>
 
           <label class="field">
-            <span class="field-label">Gist ID</span>
-            <input type="text" id="set-gist-id" placeholder="ead6fb9238714dfc51d0b3fea495e899" autocomplete="off" spellcheck="false" />
-            <span class="field-hint">The private Gist used as your data store.</span>
+            <span class="field-label">Data token &mdash; read / write</span>
+            <div class="input-reveal">
+              <input type="password" id="set-data-token" placeholder="github_pat_… (Contents: Read and write)" autocomplete="off" spellcheck="false" />
+              <button type="button" class="reveal-btn" data-reveal="set-data-token" title="Show / hide">&#128065;</button>
+            </div>
+            <span class="field-hint">Contents: <strong>Read and write</strong> on the data repo only. Stores your reports.</span>
           </label>
         </section>
 
@@ -209,7 +238,7 @@
           <p class="settings-help muted">
             Choose which provider writes the report. Each provider keeps its own
             API key, so switching never loses the others. Keys live only in this
-            browser and are <strong>never</strong> synced to the Gist.
+            browser and are <strong>never</strong> synced to the data repo.
           </p>
 
           <label class="field">
@@ -274,7 +303,30 @@
         </section>
 
         <section class="settings-section">
-          <h3 class="settings-heading">Source <span class="muted tiny">(advanced)</span></h3>
+          <h3 class="settings-heading">Advice directive <span class="muted tiny">(yours to edit)</span></h3>
+          <p class="settings-help muted">
+            This text is injected verbatim into the report prompt and governs the
+            <strong>self-improvement operating plan</strong> and
+            <strong>life advice</strong> sections. Rewrite it to change how advice
+            is written &mdash; tone, what to push on, what to never say. It syncs
+            with your reports, so both devices generate the same shape of advice.
+          </p>
+          <label class="field">
+            <span class="field-label">
+              Directive
+              <span id="advice-state" class="muted tiny"></span>
+            </span>
+            <textarea id="set-advice-prompt" class="advice-input" rows="14" spellcheck="false"
+              placeholder="how should the advice be written?"></textarea>
+            <span class="field-hint hint-row">
+              <button type="button" id="btn-reset-advice" class="btn btn-ghost btn-mini">Reset to default</button>
+              <span id="advice-count" class="muted tiny"></span>
+            </span>
+          </label>
+        </section>
+
+        <section class="settings-section">
+          <h3 class="settings-heading">Journal source <span class="muted tiny">(advanced &middot; read-only)</span></h3>
           <label class="field">
             <span class="field-label">Repository (owner/repo)</span>
             <input type="text" id="set-repo" placeholder="kalistamp/Daily_ng" autocomplete="off" spellcheck="false" />
@@ -287,6 +339,28 @@
           <label class="field">
             <span class="field-label">Branch</span>
             <input type="text" id="set-branch" placeholder="main" autocomplete="off" spellcheck="false" />
+          </label>
+        </section>
+
+        <section class="settings-section">
+          <h3 class="settings-heading">Data store <span class="muted tiny">(advanced &middot; read / write)</span></h3>
+          <p class="settings-help muted">
+            A <strong>private</strong> repo holding one JSON file. Unlike a Gist,
+            GitHub enforces access here: without the data token a request gets
+            <code>404</code> &mdash; it will not even confirm the repo exists.
+          </p>
+          <label class="field">
+            <span class="field-label">Data repository (owner/repo)</span>
+            <input type="text" id="set-data-repo" placeholder="kalistamp/daily-data" autocomplete="off" spellcheck="false" />
+          </label>
+          <label class="field">
+            <span class="field-label">Data file path</span>
+            <input type="text" id="set-data-path" placeholder="monthly-reports.json" autocomplete="off" spellcheck="false" />
+            <span class="field-hint">Created automatically on first sync if it doesn't exist.</span>
+          </label>
+          <label class="field">
+            <span class="field-label">Branch</span>
+            <input type="text" id="set-data-branch" placeholder="main" autocomplete="off" spellcheck="false" />
           </label>
         </section>
 
@@ -339,7 +413,7 @@
       <div class="modal-body" id="ledger-body"></div>
 
       <div class="modal-foot">
-        <span class="muted ledger-foot-note">Stored in the private Gist. The journal is never written to.</span>
+        <span class="muted ledger-foot-note">Stored in the private data repo. The journal is never written to.</span>
         <button class="btn btn-primary" data-close-ledger>Done</button>
       </div>
     </div>
@@ -362,7 +436,7 @@
 
   <!-- Version query busts the browser cache. Sync correctness now depends on
        every device running the SAME script: a device still serving a cached
-       pre-merge copy would keep overwriting the Gist. Bump on sync changes. -->
-  <script src="script.js?v=2"></script>
+       pre-merge copy would keep overwriting the store. Bump on sync changes. -->
+  <script src="script.js?v=4"></script>
 </body>
 </html>
