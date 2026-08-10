@@ -5,10 +5,20 @@
      • Pure client-side. No backend server. Runs entirely in the browser.
      • The parent repository holding the private daily-journal markdown stays
        100% PRIVATE. Only the static files in this `docs/` folder are public.
-     • All persistent data (reports + metadata) lives in a PRIVATE GitHub Gist
-       as JSON. The Gist stays PRIVATE.
-     • Secrets (GitHub token, Gist ID, per-provider API keys, selected provider
-       + model) are kept EXCLUSIVELY in this browser's localStorage. They are
+     • All persistent data (reports + metadata) lives as JSON in a SEPARATE
+       PRIVATE REPO. GitHub enforces that: an unauthenticated read returns 404,
+       not 403 — it will not even confirm the repo exists. This replaced a
+       secret Gist, which had NO access control at all: a gist ID is a bearer
+       credential, and this one had been published in the public site repo, so
+       anyone could read every report with one unauthenticated request.
+     • TWO tokens, deliberately. The journal token is Contents:READ-ONLY on the
+       journal repo, so no code path here — bug, typo, or otherwise — can write
+       2026daily_pt1.md; GitHub itself rejects it. The data token is
+       Contents:read+write on the data repo ONLY. A fine-grained PAT applies one
+       permission set to every repo it selects, so a single token cannot express
+       "read here, write there". Hence two. Do not merge them.
+     • Secrets (both tokens, per-provider API keys, selected provider + model)
+       are kept EXCLUSIVELY in this browser's localStorage. They are
        NEVER written into any file in this public `docs/` folder — only sent
        directly over HTTPS to api.github.com and, for the selected provider,
        one of api.openai.com / api.anthropic.com / generativelanguage.googleapis.com.
@@ -17,13 +27,15 @@
 'use strict';
 
 /* -------------------------------------------------------------- constants */
-const GIST_FILE = 'monthly-reports.json';
 // One localStorage key per provider per field, so switching the active provider
 // never loses the other providers' keys. API keys are DEVICE-LOCAL ONLY and are
-// never written into state.data / the Gist (see gistPushNow).
+// never written into state.data / the data repo (see dataPushNow).
 const LS = {
-  githubToken:    'msi.githubToken',
-  gistId:         'msi.gistId',
+  githubToken:    'msi.githubToken',   // journal repo, READ-ONLY
+  dataToken:      'msi.dataToken',     // data repo, read + write
+  dataRepo:       'msi.dataRepo',
+  dataPath:       'msi.dataPath',
+  dataBranch:     'msi.dataBranch',
   activeProvider: 'msi.activeProvider',
   openaiKey:      'msi.openaiKey',
   openaiModel:    'msi.openaiModel',
@@ -36,18 +48,24 @@ const LS = {
   branch:         'msi.branch',
   theme:          'msi.theme',
   passHash:       'msi.passHash',
-  gistCache:      'msi.gistCache',
+  // key string kept as-is: renaming it would orphan every device's cache
+  cache:          'msi.gistCache',
   lastId:         'msi.lastId',
   dirty:          'msi.dirty',
 };
-// Gist ID pre-filled from the private gist provided by the user.
+// Repo NAMES are safe to hardcode — they are useless without a token, and both
+// repos 404 for anyone who lacks one. The old gistId default is deliberately
+// gone: it was a bearer credential sitting in a public repo.
 // NOTE on the *Model defaults: blank means "Auto" — resolved against the live
 // discovery list at request time, never frozen into storage. Writing a
 // hardcoded "latest model" here would go stale the moment a vendor ships
 // something new, and would silently pin the user forever.
 const DEFAULTS = {
   githubToken:    '',
-  gistId:         'ead6fb9238714dfc51d0b3fea495e899',
+  dataToken:      '',
+  dataRepo:       'kalistamp/daily-data',
+  dataPath:       'monthly-reports.json',
+  dataBranch:     'main',
   activeProvider: 'openai',   // default summarization provider (was gemini)
   openaiKey:      '',
   openaiModel:    '',         // blank = Auto
@@ -116,22 +134,27 @@ const state = {
   currentId: null,
   pushTimer: null,
   reflectionTimer: null,
+  followupTimer: null,
   pushInFlight: null,
   models: null,
-  dirty: false,   // local edits not yet in the Gist
+  dirty: false,   // local edits not yet in the data repo
   rev: 0,         // bumped on every local edit; guards the dirty-flag clear
+  dataSha: null,  // blob sha of the last data file we read; required to update it
 };
 
 function emptyData() {
-  return { app: 'monthly-self-interrogation', version: 1, updatedAt: null, reports: [], claims: [], deleted: [] };
+  return { app: 'monthly-self-interrogation', version: 1, updatedAt: null, reports: [], claims: [], deleted: [], prompts: {} };
 }
-// Gists written before a collection existed come back without it. Normalize on
+// Stores written before a collection existed come back without it. Normalize on
 // every load path so nothing downstream has to null-check the arrays.
 function normalizeData(d) {
   const out = d && typeof d === 'object' ? d : emptyData();
   if (!Array.isArray(out.reports)) out.reports = [];
   if (!Array.isArray(out.claims)) out.claims = [];
   if (!Array.isArray(out.deleted)) out.deleted = [];
+  if (!out.prompts || typeof out.prompts !== 'object') out.prompts = {};
+  // Reports predating the follow-up feature have no questions array.
+  for (const r of out.reports) if (!Array.isArray(r.followups)) r.followups = [];
   return out;
 }
 
@@ -143,7 +166,7 @@ function saveLocal() {
   state.rev++;
   state.dirty = true;
   localStorage.setItem(LS.dirty, '1');
-  localStorage.setItem(LS.gistCache, JSON.stringify(state.data));
+  localStorage.setItem(LS.cache, JSON.stringify(state.data));
 }
 function clearDirty(atRev) {
   if (atRev !== undefined && atRev !== state.rev) return;  // edited mid-push
@@ -155,11 +178,11 @@ function clearDirty(atRev) {
 /* ---------------------------------------------------------------------------
    WHY THIS EXISTS
    ---------------------------------------------------------------------------
-   The Gist is one JSON blob and the API only offers whole-file PATCH — there is
-   no per-field write and no If-Match. So a plain "PATCH my local copy" is a
-   last-writer-wins overwrite: a phone writes 5 reports, the laptop opens with a
-   day-old cache, pushes it, and those 5 reports are gone. That is exactly what
-   happened. Every push now merges against a fresh pull instead of replacing.
+The store is one JSON blob written whole. So a plain "upload my local copy" is
+   a last-writer-wins overwrite: a phone writes 5 reports, the laptop opens with
+   a day-old cache, pushes it, and those 5 reports are gone. That is exactly what
+   happened on the old Gist backend. Every push now merges against a fresh pull
+   instead of replacing, and the contents API sha makes the write conditional.
 
    Merge is a union keyed by id, so neither device can delete the other's work
    by simply not knowing about it. Deletion therefore has to be explicit — an id
@@ -168,7 +191,15 @@ function clearDirty(atRev) {
 --------------------------------------------------------------------------- */
 const newer = (a, b) => ((a || '') > (b || '') ? a : b);
 // Last-touched stamp for a record: whichever side edited it most recently wins.
-const reportStamp = (r) => newer(r.reflectionUpdatedAt, r.generatedAt) || '';
+// Answering a follow-up counts as touching the report, or a phone that only
+// answered questions would lose to a laptop that merely opened the thing.
+const reportStamp = (r) =>
+  [r.reflectionUpdatedAt, r.generatedAt, ...(r.followups || []).map((f) => f.answeredAt)]
+    .filter(Boolean).sort().pop() || '';
+// Follow-ups: an ANSWERED question always beats an unanswered copy of itself,
+// then newer wins. Same shape of problem as claims — both devices hold the same
+// question with the same id, and only one of them has the answer in it.
+const followupStamp = (f) => `${f.a && f.a.trim() ? 1 : 0}|${f.answeredAt || ''}`;
 // Claims compare on judgement state FIRST, then time. Two devices that both
 // extracted a claim carry the same extractedAt, so a pure timestamp compare
 // ties — and a tie must not throw away the side where the user actually ruled
@@ -203,6 +234,39 @@ function idSet(d) {
   return new Set([...n.reports, ...n.claims, ...n.deleted].map((x) => x.id));
 }
 
+// Picking one whole report and discarding the other loses answers: two devices
+// can answer DIFFERENT follow-ups on the same report, and a wholesale winner
+// throws away every answer the loser held. So the report wrapper is chosen by
+// recency, but its answer-bearing fields are merged field by field.
+function mergeReportPair(a, b) {
+  const base = reportStamp(a) >= reportStamp(b) ? a : b;
+  const other = base === a ? b : a;
+  const out = { ...base };
+  if ((other.reflectionUpdatedAt || '') > (base.reflectionUpdatedAt || '')) {
+    out.reflection = other.reflection;
+    out.reflectionUpdatedAt = other.reflectionUpdatedAt;
+  }
+  out.followups = mergeById(base.followups || [], other.followups || [], followupStamp);
+  return out;
+}
+
+function mergeReports(a, b) {
+  const byId = new Map();
+  for (const r of [...a, ...b]) {
+    if (!r || !r.id) continue;
+    const prev = byId.get(r.id);
+    byId.set(r.id, prev ? mergeReportPair(prev, r) : r);
+  }
+  return [...byId.values()];
+}
+
+// Prompt overrides are plain last-write-wins on their own stamp: unlike reports
+// there is nothing to union, and the user editing on one device means to
+// replace what the other had.
+function mergePrompts(a = {}, b = {}) {
+  return (a.adviceUpdatedAt || '') >= (b.adviceUpdatedAt || '') ? { ...b, ...a } : { ...a, ...b };
+}
+
 function mergeData(local, remote) {
   const l = normalizeData(local), r = normalizeData(remote);
   const deleted = mergeById(l.deleted, r.deleted, (d) => d.at || '');
@@ -211,12 +275,13 @@ function mergeData(local, remote) {
     app: l.app || r.app,
     version: l.version || r.version,
     updatedAt: newer(l.updatedAt, r.updatedAt),
-    reports: mergeById(l.reports, r.reports, reportStamp)
+    reports: mergeReports(l.reports, r.reports)
       .filter((x) => !gone.has(x.id))
       .sort((x, y) => (y.generatedAt || '').localeCompare(x.generatedAt || '')),
     claims: mergeById(l.claims, r.claims, claimStamp, claimKey)
       .filter((x) => !gone.has(x.id)),
     deleted,
+    prompts: mergePrompts(l.prompts, r.prompts),
   };
 }
 
@@ -255,30 +320,39 @@ function missingSecrets() {
   const c = cfg();
   const miss = [];
   if (!c.githubToken) miss.push('token');
-  if (!c.gistId)      miss.push('gist');
+  if (!c.dataToken)   miss.push('datatoken');
   if (!providerKey()) miss.push('apikey');   // the ACTIVE provider's key
   return miss;
 }
+// True once both GitHub tokens are present — sync can run.
+const canSync = () => !missingSecrets().some((m) => m === 'token' || m === 'datatoken');
 
 /* ================================================================= GitHub */
-function ghHeaders(accept = 'application/vnd.github+json') {
+// The token is an explicit argument on purpose. Two tokens are in play with
+// deliberately different powers, and a default would make it easy to reach for
+// the wrong one — the write-capable data token against the journal repo is
+// precisely the mistake this whole design exists to prevent.
+function ghHeaders(token, accept = 'application/vnd.github+json') {
   return {
-    Authorization: `Bearer ${cfg().githubToken}`,
+    Authorization: `Bearer ${token}`,
     Accept: accept,
     'X-GitHub-Api-Version': '2022-11-28',
   };
 }
+const journalHeaders = (accept) => ghHeaders(cfg().githubToken, accept);
+const dataHeaders    = (accept) => ghHeaders(cfg().dataToken, accept);
 const encPath = (p) => p.split('/').map(encodeURIComponent).join('/');
 
 /* ---------------------------------------------------------------------------
-   REPO ACCESS IS READ-ONLY  ·  the app performs NO repo writes at all
+   THE JOURNAL REPO IS READ-ONLY  ·  enforced by GitHub, not by this file
    ---------------------------------------------------------------------------
-   This app never writes to the repository. It only READs the daily journal
-   (2026/2026daily_pt1.md) via GET. The former "Commit to repo" feature was
-   removed, so there is no PUT/PATCH/DELETE against any repo path anywhere in
-   this file. The only GitHub writes performed are PATCHes to the private GIST
-   (gistPushNow). Pair this with a token scoped to Contents:Read-only so GitHub
-   itself rejects any repo write, journal included.
+   Nothing here writes the journal repo. It is only READ (githubFetchNotes), and
+   only ever with `githubToken`, which is scoped Contents:Read-only — so even a
+   bug that tried to write it would get a 403 from GitHub.
+
+   Writes go exclusively to the DATA repo, with `dataToken`, which has no access
+   to the journal repo at all. The two tokens are never interchanged; that is
+   the whole point of having two.
 --------------------------------------------------------------------------- */
 
 // READ-ONLY: issues only GET requests against the journal. Never writes it.
@@ -290,7 +364,7 @@ async function githubFetchNotes() {
   // yielded the JSON envelope instead of file text and made every month look
   // empty. The JSON endpoint is the CORS-safe, browser-supported path.
   const url = `https://api.github.com/repos/${repo}/contents/${encPath(notesPath)}?ref=${encodeURIComponent(branch)}`;
-  const res = await fetch(url, { headers: ghHeaders() });
+  const res = await fetch(url, { headers: journalHeaders() });
   if (!res.ok) {
     if (res.status === 404) throw new Error(`Notes file not found: ${repo}/${notesPath}@${branch}. Check the path in Settings.`);
     if (res.status === 401 || res.status === 403) throw new Error(`GitHub auth failed (${res.status}). Token needs Contents:read on ${repo}.`);
@@ -301,7 +375,7 @@ async function githubFetchNotes() {
   // Files > 1 MB: the contents API omits content. Fall back to the Git Blobs
   // API (also JSON + base64, so still CORS-safe).
   if (j && j.sha) {
-    const b = await fetch(`https://api.github.com/repos/${repo}/git/blobs/${j.sha}`, { headers: ghHeaders() });
+    const b = await fetch(`https://api.github.com/repos/${repo}/git/blobs/${j.sha}`, { headers: journalHeaders() });
     if (b.ok) {
       const bj = await b.json();
       if (bj && bj.content && bj.encoding === 'base64') return b64DecodeUnicode(bj.content);
@@ -310,18 +384,42 @@ async function githubFetchNotes() {
   throw new Error('Could not read notes content from GitHub (unexpected response shape).');
 }
 
-async function gistPull() {
-  const { gistId } = cfg();
-  const res = await fetch(`https://api.github.com/gists/${encodeURIComponent(gistId)}`, { headers: ghHeaders() });
+const dataUrl = () => {
+  const { dataRepo, dataPath } = cfg();
+  return `https://api.github.com/repos/${dataRepo}/contents/${encPath(dataPath)}`;
+};
+
+// Reads the data file and remembers its blob sha, which the next write must
+// quote. A 404 means the file has not been created yet — that is the normal
+// first-run state, NOT an error, so it yields empty data and a null sha.
+async function dataPull() {
+  const { dataRepo, dataBranch } = cfg();
+  const res = await fetch(`${dataUrl()}?ref=${encodeURIComponent(dataBranch)}`, { headers: dataHeaders() });
+  if (res.status === 404) {
+    // Distinguish "no file yet" from "no access": without the repo itself being
+    // visible, GitHub 404s too, and silently treating that as "empty" would let
+    // a bad token look like a fresh install and wipe the store on first push.
+    const probe = await fetch(`https://api.github.com/repos/${dataRepo}`, { headers: dataHeaders() });
+    if (!probe.ok) throw new Error(`Cannot reach ${dataRepo} (${probe.status}). Check the data token's repo access.`);
+    state.dataSha = null;
+    return emptyData();
+  }
   if (!res.ok) {
-    if (res.status === 404) throw new Error('Gist not found. Check the Gist ID and that your token can read it.');
-    throw new Error(`Gist read failed (${res.status}).`);
+    if (res.status === 401 || res.status === 403) throw new Error(`Data repo auth failed (${res.status}). The data token needs Contents:read+write on ${dataRepo}.`);
+    throw new Error(`Data read failed (${res.status}).`);
   }
   const j = await res.json();
-  const file = j.files?.[GIST_FILE];
-  if (!file) return emptyData();
-  let content = file.content;
-  if (file.truncated && file.raw_url) content = await (await fetch(file.raw_url)).text();
+  state.dataSha = j.sha || null;
+  let content = '';
+  if (j.content && j.encoding === 'base64') content = b64DecodeUnicode(j.content);
+  else if (j.sha) {
+    // Files > 1 MB come back without inline content; the blobs API still has it.
+    const b = await fetch(`https://api.github.com/repos/${dataRepo}/git/blobs/${j.sha}`, { headers: dataHeaders() });
+    if (b.ok) {
+      const bj = await b.json();
+      if (bj.content && bj.encoding === 'base64') content = b64DecodeUnicode(bj.content);
+    }
+  }
   try {
     return normalizeData(JSON.parse(content));
   } catch {
@@ -330,24 +428,42 @@ async function gistPull() {
   }
 }
 
-// READ-MERGE-WRITE. Never PATCHes the local copy straight over the remote: the
-// Gist API replaces the whole file, so a blind write silently deletes anything
-// another device added since this one last pulled. Pull first, merge, then push
-// the union. A failed pull aborts the push — better unsynced than overwritten.
-async function gistPushNow() {
-  const { gistId } = cfg();
+// READ-MERGE-WRITE. Never PUTs the local copy straight over the remote: the
+// contents API replaces the whole file, so a blind write silently deletes
+// anything another device added since this one last pulled. Pull first, merge,
+// then write the union. A failed pull aborts the write — better unsynced than
+// overwritten.
+//
+// The sha gives us real optimistic concurrency, which the Gist never had: if
+// another device wrote between our pull and our PUT, GitHub rejects it with 409
+// instead of quietly taking our version. We re-pull, re-merge and retry, so a
+// genuine race costs a round trip rather than someone's reports.
+async function dataPushNow(attempt = 0) {
   const atRev = state.rev;
-  state.data = mergeData(state.data, await gistPull());
+  state.data = mergeData(state.data, await dataPull());
   state.data.updatedAt = new Date().toISOString();
-  const body = { files: { [GIST_FILE]: { content: JSON.stringify(state.data, null, 2) } } };
-  const res = await fetch(`https://api.github.com/gists/${encodeURIComponent(gistId)}`, {
-    method: 'PATCH', headers: ghHeaders(), body: JSON.stringify(body),
-  });
+
+  const body = {
+    message: `reports: ${state.data.reports.length} report(s), ${state.data.claims.length} claim(s)`,
+    content: b64EncodeUnicode(JSON.stringify(state.data, null, 2)),
+    branch: cfg().dataBranch,
+  };
+  if (state.dataSha) body.sha = state.dataSha;   // omitted on create
+
+  const res = await fetch(dataUrl(), { method: 'PUT', headers: dataHeaders(), body: JSON.stringify(body) });
+  if (res.status === 409 || res.status === 422) {
+    if (attempt >= 3) throw new Error('Data repo kept changing under us — try syncing again.');
+    state.dataSha = null;
+    return dataPushNow(attempt + 1);
+  }
   if (!res.ok) {
     const e = await res.json().catch(() => ({}));
-    throw new Error(e.message || `Gist write failed (${res.status}). Token needs Gists:write.`);
+    if (res.status === 403) throw new Error(`Write refused (403). The data token needs Contents:write on ${cfg().dataRepo}.`);
+    throw new Error(e.message || `Data write failed (${res.status}).`);
   }
-  localStorage.setItem(LS.gistCache, JSON.stringify(state.data));
+  const j = await res.json().catch(() => ({}));
+  state.dataSha = j.content?.sha || null;
+  localStorage.setItem(LS.cache, JSON.stringify(state.data));
   clearDirty(atRev);
 }
 
@@ -763,6 +879,60 @@ function findOpenLoops(entries) {
   return loops.slice(0, 25);
 }
 
+/* ====================================================== advice directive */
+/* ---------------------------------------------------------------------------
+   USER-OWNED PROMPT
+   ---------------------------------------------------------------------------
+   This block is edited by the user in Settings and injected verbatim into the
+   report system prompt. It lives in the synced data file, not localStorage, so
+   the phone and the laptop cannot drift into generating differently-shaped
+   advice from the same journal.
+
+   It is deliberately the ONLY user-editable prompt. The report's section list
+   and the strict JSON contracts elsewhere are parsed by code — letting those be
+   edited would break parsing rather than change the writing.
+--------------------------------------------------------------------------- */
+const DEFAULT_ADVICE_PROMPT = [
+  'Advice stance: a specific, well-read friend who has read every entry and is invested in the outcome.',
+  'Not a life coach, not a therapist, not a motivational writer. Never inspirational, never generic.',
+  '',
+  'Every piece of advice must:',
+  '- attach to something concrete in the entries — a date, a project, a number, a decision, an abandoned thread.',
+  '- be actionable this week by someone with a job and limited evenings.',
+  '- name the tradeoff honestly. what does this cost, and what gets dropped to make room?',
+  '- say the uncomfortable thing when the entries support it. avoiding it is not kindness.',
+  '',
+  'Never:',
+  '- recommend anything the entries give no evidence for.',
+  '- offer generic wellness advice (sleep more, drink water, take breaks) unless the entries specifically show it breaking down.',
+  '- pad with encouragement, affirmation, or "you\'ve got this".',
+  '- suggest a system, app, or tool as a substitute for a decision they are avoiding.',
+  '',
+  'Bias toward: finishing over starting, deciding over researching, one thing well over five things partially.',
+  'When the entries show a long-running avoidance, name it directly and say what it is costing.',
+].join('\n');
+
+// The user's edit if there is one, else the default. Kept as a function so a
+// mid-session change to the synced data takes effect on the next report.
+function advicePrompt() {
+  const p = (state.data.prompts && state.data.prompts.advice) || '';
+  return p.trim() ? p : DEFAULT_ADVICE_PROMPT;
+}
+function adviceIsCustom() {
+  const p = (state.data.prompts && state.data.prompts.advice) || '';
+  return !!p.trim() && p.trim() !== DEFAULT_ADVICE_PROMPT.trim();
+}
+function setAdvicePrompt(text) {
+  const t = (text || '').trim();
+  state.data.prompts = state.data.prompts || {};
+  // Storing '' means "use the default", so resetting is a real state, not a
+  // copy of today's default text frozen into the file forever.
+  state.data.prompts.advice = t === DEFAULT_ADVICE_PROMPT.trim() ? '' : t;
+  state.data.prompts.adviceUpdatedAt = new Date().toISOString();
+  saveLocal();
+  schedulePush();
+}
+
 /* =========================================================== prompt build */
 function buildSystemPrompt() {
   return [
@@ -818,19 +988,80 @@ function buildSystemPrompt() {
     '    - **weekly rhythm:** the minimum recurring habit, review, or time block.',
     '    - **measurement:** how they will know progress is real and not just felt.',
     '    - **if/then:** the likely obstacle and the pre-decided response.',
+    '    - **what this costs:** what gets less attention because this got more. every priority displaces something.',
     '  - close with a `### stop doing` block: one tempting, lower-value activity to cut, defer, or cap — and what it frees up.',
     '  - practical only. no pep talk, no advice the entries do not support.',
+    '## life advice',
+    '  - the longest and most substantial section of the report. write it as prose with `###` subheadings, not as a bullet dump.',
+    '  - this is the section they actually came for. spend real words here — several paragraphs per subheading, not one-liners.',
+    '  - use these five `###` subheadings, written EXACTLY as shown (they address the reader as "you", like the rest of the report):',
+    '    - `### the pattern you cannot see` — the thing recurring across months that is invisible from inside it. name it, show the dated evidence, say where it leads if nothing changes.',
+    '    - `### the decision being avoided` — the choice the entries keep circling without making. state it plainly, lay out the real options with their actual costs, and say which one you would take and why.',
+    '    - `### leverage` — where a small change compounds. be specific about the mechanism, not just the suggestion.',
+    '    - `### the honest risk` — what is most likely to go wrong in the next 6–12 months given these entries. not catastrophizing; the realistic failure mode, and the cheapest hedge against it.',
+    '    - `### what is actually working` — the thing they are underrating and should do more of. evidence-based, not consolation.',
+    '  - if a subheading has nothing real behind it, keep the heading and say in one line that the entries do not support it. do not invent material to fill it.',
+    '  - where the entries are about work, money, health, or relationships, engage with the substance. do not retreat to process advice.',
+    '  - argue for your recommendations. show the reasoning so they can disagree with it on the merits.',
     '',
-    'Rules: output only the report as Markdown. no preamble, no closing note. exactly the eight `##` sections above, in that order. every question goes on its own line as a list item.',
-  ].join('\n');
+    'ADVICE DIRECTIVE — governs `## self-improvement operating plan` and `## life advice`.',
+    'This is written by the user and overrides the tone guidance above for those two sections where they conflict:',
+    '<<<ADVICE_DIRECTIVE>>>',
+    '',
+    'Rules: output only the report as Markdown. no preamble, no closing note. exactly the nine `##` sections above, in that order. every question goes on its own line as a list item.',
+  ].join('\n').replace('<<<ADVICE_DIRECTIVE>>>', advicePrompt());
 }
 
-function buildUserPrompt(monthStr, slice, themes, loops, priorContext) {
+/* --------------------------------------------------- accumulated context */
+/* ---------------------------------------------------------------------------
+   Everything the user has already told the app, in the form the model needs.
+
+   This is the fix for "it keeps asking me things I already answered". Answers
+   used to reach the prompt only as three blobs of free text from the reflection
+   box, so nothing tied a given answer to the question that produced it and the
+   model had no way to tell what ground was already covered. Answered follow-ups
+   are Q&A PAIRS, which is both denser context and a checkable do-not-repeat
+   list — and unlike the old window they are not capped at three reports.
+--------------------------------------------------------------------------- */
+const answeredFollowups = () =>
+  state.data.reports.flatMap((r) =>
+    (r.followups || [])
+      .filter((f) => f.a && f.a.trim())
+      .map((f) => ({ month: r.month, q: f.q, a: f.a.trim(), answeredAt: f.answeredAt || r.generatedAt }))
+  ).sort((a, b) => (b.answeredAt || '').localeCompare(a.answeredAt || ''));
+
+// Cap by characters, not by count: a handful of long answers can blow the
+// context budget as easily as many short ones, and truncating mid-answer is
+// worse than dropping the oldest whole ones.
+function answeredContextBlock(limitChars = 14000) {
+  const qa = answeredFollowups();
+  const out = [];
+  let used = 0;
+  for (const x of qa) {
+    const line = `Q [${x.month}] ${x.q}\nA: ${x.a}`;
+    if (used + line.length > limitChars) break;
+    out.push(line);
+    used += line.length;
+  }
+  return { block: out.join('\n\n'), shown: out.length, total: qa.length };
+}
+
+// The free-text reflection box is separate from the Q&A pairs and still worth
+// carrying; it is where they write things nothing asked about.
+const reflectionContext = () =>
+  state.data.reports
+    .filter((r) => r.reflection && r.reflection.trim())
+    .slice(0, 3)
+    .map((r) => `[${r.month}] ${r.reflection.trim()}`);
+
+function buildUserPrompt(monthStr, slice, themes, loops) {
   const themeLine = themes.length
     ? themes.map((t) => `${t.label} (${t.score})`).join(', ')
     : 'none detected locally';
   const loopBlock = loops.length ? loops.map((l) => `- ${l}`).join('\n') : '- (none auto-detected)';
   const body = slice.map((e) => `### ${e.date}${e.title ? ' ' + e.title : ''}\n${e.body}`).join('\n\n');
+  const answered = answeredContextBlock();
+  const reflections = reflectionContext();
   return [
     `TARGET MONTH: ${monthStr} (entries below cover the selected date range; may extend outside the month).`,
     `LOCALLY DETECTED THEMES (weight): ${themeLine}`,
@@ -839,9 +1070,15 @@ function buildUserPrompt(monthStr, slice, themes, loops, priorContext) {
     '',
     // Their own answers to earlier reports — the entries alone are terse, so
     // this is where accumulated context lives. Do not re-ask what it answers.
-    '=== ESTABLISHED CONTEXT (their own answers to earlier reports) ===',
-    (priorContext || []).join('\n\n') || '(none yet)',
-    '=== END ESTABLISHED CONTEXT ===',
+    '=== ALREADY ANSWERED (their own answers to earlier questions) ===',
+    'Treat every answer below as established fact. Use it to decode terse entries.',
+    'Do NOT ask any question this section already answers, in any rephrasing.',
+    answered.block || '(none yet)',
+    '=== END ALREADY ANSWERED ===',
+    '',
+    '=== FREE-FORM REFLECTIONS (most recent) ===',
+    reflections.join('\n\n') || '(none yet)',
+    '=== END REFLECTIONS ===',
     '',
     '=== JOURNAL ENTRIES ===',
     body || '(no entries found)',
@@ -849,14 +1086,116 @@ function buildUserPrompt(monthStr, slice, themes, loops, priorContext) {
   ].join('\n');
 }
 
+/* ================================================= follow-up question set */
+/* ---------------------------------------------------------------------------
+   A SECOND pass, not part of the report.
+
+   The report's questions are prose inside Markdown — good to read, impossible
+   to answer in place and impossible to track. These are the same intent in a
+   structured form: emitted as JSON, rendered as individual answer boxes, and
+   fed back verbatim as Q&A pairs on the next run. That loop is the only way the
+   model ever learns what it already knows.
+--------------------------------------------------------------------------- */
+function buildFollowupSystemPrompt() {
+  return [
+    'You write follow-up questions for a monthly journal self-interrogation tool.',
+    'You are given a report that was just generated, the journal entries behind it, and every question the user has ALREADY answered.',
+    'Output ONE JSON object and nothing else — no prose, no code fence, no explanation.',
+    '',
+    'Shape: {"questions":[{"q":"","theme":"","why":""}]}',
+    '',
+    'Produce 6-10 questions. Each one:',
+    '- must be answerable in 1-4 sentences from memory. these get answered in a text box, not researched.',
+    '- must close a REAL gap: something the entries reference without explaining, a decision with no stated reason, a thread that stops mid-air, a stretch of days with no entries.',
+    '- must name the specific thing it is about — the project, the date, the person, the number. a question that could be asked of any journal is worthless here.',
+    '- "theme": one short lowercase tag (ai, cyber, health, career, privacy, life).',
+    '- "why": one short clause stating what answering it would let a future report do better. this is shown to the user.',
+    '',
+    'HARD RULE — the ALREADY ANSWERED block is the point of this whole exercise.',
+    'Do not ask anything it answers. Do not ask a rephrasing, a narrowing, or a follow-on that the answer already covers.',
+    'If an answer there is partial, you may go DEEPER, but the question must acknowledge what is already known and ask only for the missing piece.',
+    '',
+    'Order the questions so the highest-value gap is first — the one whose answer would most change how the next report reads.',
+    'Prefer factual gap-filling over reflection. The report already handles reflection; this is for context the model does not have.',
+  ].join('\n');
+}
+
+function buildFollowupUserPrompt(reportMd, slice, monthStr) {
+  const answered = answeredContextBlock(10000);
+  const body = slice.map((e) => `### ${e.date}\n${e.body}`).join('\n\n');
+  return [
+    `TARGET MONTH: ${monthStr}`,
+    '',
+    '=== ALREADY ANSWERED — never ask these again ===',
+    answered.block || '(nothing answered yet — this is the first pass)',
+    `=== END ALREADY ANSWERED (${answered.shown} of ${answered.total} shown) ===`,
+    '',
+    '=== THE REPORT JUST GENERATED ===',
+    reportMd,
+    '=== END REPORT ===',
+    '',
+    '=== JOURNAL ENTRIES FOR THIS PERIOD ===',
+    body || '(no entries found)',
+    '=== END ENTRIES ===',
+  ].join('\n');
+}
+
+// Returns [] rather than throwing: a report that generated fine must not be
+// lost because the question pass failed.
+async function generateFollowups(provider, model, reportMd, slice, monthStr, onProgress) {
+  try {
+    const gen = await providerGenerate(
+      provider, model, buildFollowupSystemPrompt(),
+      buildFollowupUserPrompt(reportMd, slice, monthStr), onProgress
+    );
+    const out = parseJsonLoose(gen.text);
+    const seen = new Set(answeredFollowups().map((x) => normQuote(x.q)));
+    const list = [];
+    for (const raw of Array.isArray(out.questions) ? out.questions : []) {
+      const q = String(raw && raw.q || '').trim();
+      if (!q) continue;
+      // Belt and braces: the prompt forbids repeats, but a model that ignores
+      // it should not put the same question in front of the user twice.
+      const key = normQuote(q);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      list.push({
+        id: 'f-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7),
+        q: q.slice(0, 400),
+        theme: String(raw.theme || '').trim().toLowerCase().slice(0, 16),
+        why: String(raw.why || '').trim().slice(0, 200),
+        a: '',
+        answeredAt: null,
+      });
+    }
+    return list;
+  } catch (e) {
+    console.warn('follow-up generation failed:', e.message);
+    return [];
+  }
+}
+
 /* ============================================================ base64 utf8 */
 // GitHub returns base64 with embedded newlines; strip whitespace, then decode
 // as UTF-8 (atob alone mangles multi-byte chars like em dashes / arrows).
-// (Read-only: only a DECODER is needed — the app never encodes/writes repo files.)
 function b64DecodeUnicode(b64) {
   const bin = atob((b64 || '').replace(/\s/g, ''));
   const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
   return new TextDecoder('utf-8').decode(bytes);
+}
+// Mirror image, for writing the data file. btoa() takes a "binary string" — one
+// char per byte — so the text must be UTF-8 encoded FIRST. Passing a JS string
+// straight to btoa throws on any character above U+00FF, and the reports are
+// full of em dashes and arrows.
+function b64EncodeUnicode(str) {
+  const bytes = new TextEncoder().encode(str);
+  let bin = '';
+  // Chunked: String.fromCharCode(...bytes) blows the argument limit on a large
+  // report set, which would surface as a mystery RangeError mid-sync.
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(bin);
 }
 
 /* ======================================================= markdown → HTML */
@@ -915,18 +1254,18 @@ function setSync(kind, label) {
   el.className = 'sync-status' + (kind ? ' is-' + kind : '');
   $('.sync-label', el).textContent = label;
 }
-function scheduleGistPush() {
+function schedulePush() {
   setSync('dirty', 'unsynced');
   clearTimeout(state.pushTimer);
-  state.pushTimer = setTimeout(flushGistPush, 1200);
+  state.pushTimer = setTimeout(flushPush, 1200);
 }
-async function flushGistPush() {
+async function flushPush() {
   clearTimeout(state.pushTimer);
   if (!state.dirty) { setSync('synced', 'synced'); return; }
   if (state.pushInFlight) return state.pushInFlight;
   setSync('busy', 'syncing…');
   state.pushInFlight = (async () => {
-    try { await gistPushNow(); setSync('synced', 'synced'); }
+    try { await dataPushNow(); setSync('synced', 'synced'); }
     catch (e) { setSync('error', 'sync failed'); toast(e.message, 'err'); }
     finally { state.pushInFlight = null; }
   })();
@@ -934,27 +1273,27 @@ async function flushGistPush() {
 }
 
 async function cloudSync() {
-  if (missingSecrets().includes('token') || missingSecrets().includes('gist')) {
-    toast('Add your GitHub token and Gist ID in Settings first.', 'err');
+  if (!canSync()) {
+    toast('Add both GitHub tokens in Settings first.', 'err');
     openSettings();
     return;
   }
   setSync('busy', 'syncing…');
   try {
-    await flushGistPush();                  // push pending local edits (merging)
+    await flushPush();                  // push pending local edits (merging)
     setSync('busy', 'syncing…');
     // Then reconcile with the remote. NOT an assignment: `state.data = pull()`
     // discards anything this device holds that the Gist has not seen yet, which
     // on a failed/absent push is silent local data loss. Merge keeps both sides.
-    const remote = await gistPull();
+    const remote = await dataPull();
     state.data = mergeData(state.data, remote);
-    localStorage.setItem(LS.gistCache, JSON.stringify(state.data));
+    localStorage.setItem(LS.cache, JSON.stringify(state.data));
     // If this device turned out to be holding records the Gist lacks — a push
     // that failed earlier, a cleared dirty flag — the merge just recovered them
     // locally. Send them up, or they stay stranded on this device forever.
     if (idSet(state.data).size > idSet(remote).size) {
       saveLocal();
-      await flushGistPush();
+      await flushPush();
     }
     renderHistory();
     if (state.currentId && !state.data.reports.find((r) => r.id === state.currentId)) {
@@ -963,7 +1302,7 @@ async function cloudSync() {
       renderReport(state.data.reports.find((r) => r.id === state.currentId));
     }
     setSync('synced', 'synced');
-    toast('Synced with private Gist.', 'ok');
+    toast('Synced with private data repo.', 'ok');
   } catch (e) {
     setSync('error', 'sync failed');
     toast(e.message, 'err');
@@ -997,14 +1336,6 @@ async function generateReport() {
     const themes = analyzeThemes(joined);
     const loops = findOpenLoops(slice);
 
-    // Reflections written against earlier reports, newest first (reports are
-    // unshifted, and this one isn't stored yet). Rolling window of 3 keeps the
-    // token cost bounded; older answers age out.
-    const priorContext = state.data.reports
-      .filter((r) => r.reflection && r.reflection.trim())
-      .slice(0, 3)
-      .map((r) => `[${r.month}] ${r.reflection.trim()}`);
-
     // slice is sorted ascending, so first/last entries bound what was read.
     const rangeStart = slice[0].date;
     const rangeEnd = slice[slice.length - 1].date;
@@ -1016,11 +1347,18 @@ async function generateReport() {
 
     showProgress(true, `Interrogating ${model}…`);
     const gen = await providerGenerate(
-      provider, model, buildSystemPrompt(), buildUserPrompt(month, slice, themes, loops, priorContext),
+      provider, model, buildSystemPrompt(), buildUserPrompt(month, slice, themes, loops),
       (m, isFallback) => showProgress(true, `${isFallback ? 'Falling back to' : 'Interrogating'} ${m}…`)
     );
     const reportMd = gen.text;
     if (gen.fellBack) toast(`"${model}" unavailable — used "${gen.model}" instead.`, 'ok');
+
+    // Second pass, before the report is stored, so the questions land with it.
+    showProgress(true, 'Drafting follow-up questions…');
+    const followups = await generateFollowups(
+      provider, gen.model, reportMd, slice, month,
+      (m, fb) => showProgress(true, `${fb ? 'Falling back to' : 'Drafting questions with'} ${m}…`)
+    );
 
     const report = {
       id: `${month}-${Date.now().toString(36)}`,
@@ -1037,18 +1375,30 @@ async function generateReport() {
       themeSummary: themes.length ? themes.slice(0, 4).map((t) => t.label).join(', ') : 'none detected',
       themes,
       report: reportMd,
+      followups,
       reflection: '',
       reflectionUpdatedAt: null,
     };
 
     state.data.reports.unshift(report);
     saveLocal();
-    showProgress(true, 'Saving to private Gist…');
-    await flushGistPushImmediate();
+    showProgress(true, 'Saving to private data repo…');
+    await flushPushImmediate();
 
     selectReport(report.id);
     renderHistory();
-    toast(`Report for ${month} generated — ${fmtDayRange(rangeStart, rangeEnd)} (${slice.length} entries).`, 'ok');
+    toast(
+      `Report for ${month} generated — ${fmtDayRange(rangeStart, rangeEnd)} (${slice.length} entries)` +
+      (followups.length ? ` · ${followups.length} follow-up questions` : ''),
+      'ok'
+    );
+
+    // The claims ledger used to depend on the user finding a button inside a
+    // modal they had no reason to open, which is why it stayed empty through
+    // every report ever generated. It runs here instead, off the journal we
+    // already fetched. Non-fatal: the report is already saved and pushed.
+    showProgress(true, 'Updating claim ledger…');
+    await extractClaims({ entries, byDate: byDateOf(entries), silent: true });
   } catch (e) {
     toast(e.message, 'err');
   } finally {
@@ -1057,11 +1407,17 @@ async function generateReport() {
   }
 }
 
+const byDateOf = (entries) => {
+  const m = {};
+  for (const e of entries) m[e.date] = e;
+  return m;
+};
+
 // Immediate (awaited) push used right after generation.
-async function flushGistPushImmediate() {
+async function flushPushImmediate() {
   setSync('busy', 'syncing…');
-  try { await gistPushNow(); setSync('synced', 'synced'); }
-  catch (e) { setSync('error', 'sync failed'); toast('Saved locally, Gist push failed: ' + e.message, 'err'); }
+  try { await dataPushNow(); setSync('synced', 'synced'); }
+  catch (e) { setSync('error', 'sync failed'); toast('Saved locally, sync failed: ' + e.message, 'err'); }
 }
 
 /* ================================================================ actions */
@@ -1076,7 +1432,7 @@ function selectReport(id) {
 async function deleteCurrentReport() {
   const r = currentReport();
   if (!r) return;
-  const ok = await confirmDialog('Delete report', `Delete the ${r.month} report from the Gist? This can't be undone.`);
+  const ok = await confirmDialog('Delete report', `Delete the ${r.month} report from your data repo? This can't be undone.`);
   if (!ok) return;
   state.data.reports = state.data.reports.filter((x) => x.id !== r.id);
   // Tombstone, not just a local removal: sync is a union now, so a report that
@@ -1087,7 +1443,7 @@ async function deleteCurrentReport() {
   state.currentId = null;
   showEmpty();
   renderHistory();
-  await flushGistPushImmediate();
+  await flushPushImmediate();
   toast('Report deleted.', 'ok');
 }
 
@@ -1133,8 +1489,8 @@ function onReflectionInput() {
   $('#reflection-status').textContent = 'saving…';
   clearTimeout(state.reflectionTimer);
   state.reflectionTimer = setTimeout(async () => {
-    await flushGistPush();
-    $('#reflection-status').textContent = 'saved to Gist';
+    await flushPush();
+    $('#reflection-status').textContent = 'saved';
   }, 1000);
 }
 function currentReport() { return state.data.reports.find((x) => x.id === state.currentId) || null; }
@@ -1159,6 +1515,14 @@ function renderHistory() {
       `<span class="hi-sub">` +
       (range ? `<span>${range}</span>` : '') +
       `<span>${modelLabel}</span><span>${fmtDate(r.generatedAt)}</span>` +
+      // Follow-ups are the main way answers get in now, so the list has to show
+      // which reports still have questions waiting.
+      (() => {
+        const fu = r.followups || [];
+        if (!fu.length) return '';
+        const done = fu.filter((f) => f.a && f.a.trim()).length;
+        return `<span>· ${done}/${fu.length} answered</span>`;
+      })() +
       (r.reflection ? '<span>· reflected</span>' : '') + `</span>`;
     li.addEventListener('click', () => selectReport(r.id));
     list.appendChild(li);
@@ -1200,8 +1564,109 @@ function renderReport(r) {
     tags.appendChild(s);
   });
   $('#report-body').innerHTML = mdToHtml(r.report);
+  renderFollowups(r);
   $('#reflection-input').value = r.reflection || '';
-  $('#reflection-status').textContent = r.reflectionUpdatedAt ? 'saved ' + fmtDate(r.reflectionUpdatedAt) : 'auto-saves to Gist';
+  $('#reflection-status').textContent = r.reflectionUpdatedAt ? 'saved ' + fmtDate(r.reflectionUpdatedAt) : 'auto-saves';
+}
+
+/* ------------------------------------------------------- follow-up panel */
+// Rebuilt wholesale on report switch. The textareas carry their id in a data
+// attribute and are read by delegated handlers, so no per-question listeners
+// have to be torn down when the list is replaced.
+function renderFollowups(r) {
+  const wrap = $('#followups');
+  const list = $('#followup-list');
+  const status = $('#followup-status');
+  if (!wrap || !list) return;
+  const fu = r.followups || [];
+  const answered = fu.filter((f) => f.a && f.a.trim()).length;
+
+  status.textContent = fu.length ? `${answered} of ${fu.length} answered` : '';
+  if (!fu.length) {
+    list.innerHTML =
+      `<p class="muted followup-empty">No follow-up questions on this report. ` +
+      `Use <strong>Ask follow-ups</strong> to generate a set — answers feed into every future report so the same ground is never re-covered.</p>`;
+    return;
+  }
+  list.innerHTML = fu.map((f, i) => `
+    <li class="followup${f.a && f.a.trim() ? ' is-answered' : ''}">
+      <div class="fu-q">
+        <span class="fu-n">${i + 1}</span>
+        <div class="fu-qtext">
+          ${f.theme ? `<span class="fu-theme">${escapeHtml(f.theme)}</span>` : ''}
+          <span>${escapeHtml(f.q)}</span>
+          ${f.why ? `<span class="fu-why muted">${escapeHtml(f.why)}</span>` : ''}
+        </div>
+      </div>
+      <textarea class="fu-input" data-fu="${f.id}" rows="2"
+        placeholder="short answer — a sentence or two is plenty">${escapeHtml(f.a || '')}</textarea>
+    </li>`).join('');
+}
+
+function onFollowupInput(e) {
+  const ta = e.target.closest('.fu-input');
+  if (!ta) return;
+  const r = currentReport();
+  if (!r) return;
+  const f = (r.followups || []).find((x) => x.id === ta.dataset.fu);
+  if (!f) return;
+  f.a = ta.value;
+  f.answeredAt = f.a.trim() ? new Date().toISOString() : null;
+  ta.closest('.followup').classList.toggle('is-answered', !!f.a.trim());
+  const fu = r.followups || [];
+  $('#followup-status').textContent =
+    `${fu.filter((x) => x.a && x.a.trim()).length} of ${fu.length} answered · saving…`;
+  saveLocal();
+  clearTimeout(state.followupTimer);
+  state.followupTimer = setTimeout(async () => {
+    await flushPush();
+    const n = (currentReport()?.followups || []);
+    $('#followup-status').textContent = `${n.filter((x) => x.a && x.a.trim()).length} of ${n.length} answered · saved`;
+  }, 1000);
+}
+
+// Generates an ADDITIONAL set for the current report. Existing questions and
+// their answers are kept — this appends, so nothing already answered is lost.
+async function askMoreFollowups() {
+  const r = currentReport();
+  if (!r) return;
+  if (missingSecrets().includes('apikey')) {
+    toast('Add the active provider\'s API key in Settings first.', 'err');
+    openSettings();
+    return;
+  }
+  const btn = $('#btn-followups');
+  btn.disabled = true;
+  showProgress(true, 'Fetching journal…');
+  try {
+    const entries = parseEntries(await githubFetchNotes());
+    const slice = sliceForRange(entries, r.requestedStart || r.rangeStart, r.requestedEnd || r.rangeEnd);
+    const provider = r.provider && PROVIDERS[r.provider] ? r.provider : activeProvider();
+    const picked = await resolveModel(provider, (t) => showProgress(true, t));
+    showProgress(true, 'Drafting follow-up questions…');
+    // Existing questions join the do-not-repeat set even when unanswered, so a
+    // second press produces genuinely new ground rather than a reshuffle.
+    const existing = new Set((r.followups || []).map((f) => normQuote(f.q)));
+    const fresh = (await generateFollowups(
+      provider, picked.model, r.report, slice.length ? slice : entries, r.month,
+      (m, fb) => showProgress(true, `${fb ? 'Falling back to' : 'Drafting questions with'} ${m}…`)
+    )).filter((f) => !existing.has(normQuote(f.q)));
+
+    if (!fresh.length) {
+      toast('No new questions — the model had nothing left that your answers do not already cover.', '');
+      return;
+    }
+    r.followups = [...(r.followups || []), ...fresh];
+    saveLocal();
+    renderFollowups(r);
+    await flushPushImmediate();
+    toast(`${fresh.length} new follow-up question${fresh.length === 1 ? '' : 's'}.`, 'ok');
+  } catch (e) {
+    toast(e.message, 'err');
+  } finally {
+    btn.disabled = false;
+    showProgress(false);
+  }
 }
 
 function showEmpty() {
@@ -1507,24 +1972,34 @@ function setLedgerStatus(text) {
 }
 function persistLedger() {
   saveLocal();
-  scheduleGistPush();
+  schedulePush();
 }
 
-async function extractClaims() {
+/* ---------------------------------------------------------------------------
+   Runs from the ledger button AND automatically after every report.
+
+   `opts.entries` lets the report flow hand over the journal it already fetched
+   rather than pulling it a second time. `opts.silent` keeps the automatic run
+   from stealing the report's completion toast unless it actually found
+   something — a "0 new" popup after every report is noise.
+--------------------------------------------------------------------------- */
+async function extractClaims(opts = {}) {
   const miss = missingSecrets();
   if (miss.length) {
-    toast('Missing keys: ' + miss.join(', ') + '. Opening Settings.', 'err');
-    openSettings();
+    if (!opts.silent) { toast('Missing keys: ' + miss.join(', ') + '. Opening Settings.', 'err'); openSettings(); }
     return;
   }
   const btn = $('#btn-extract');
-  btn.disabled = true;
+  if (btn) btn.disabled = true;
   try {
-    setLedgerStatus('Fetching journal…');
-    const entries = parseEntries(await githubFetchNotes());
+    let entries = opts.entries;
+    let byDate = opts.byDate;
+    if (!entries) {
+      setLedgerStatus('Fetching journal…');
+      entries = parseEntries(await githubFetchNotes());
+      byDate = byDateOf(entries);
+    }
     if (!entries.length) throw new Error(`No dated entries found in ${cfg().notesPath}.`);
-    const byDate = {};
-    for (const e of entries) byDate[e.date] = e;
 
     // The whole journal, not a month: January's claims are settled by July's
     // entries, so a month-scoped pass would leave nearly everything open.
@@ -1541,22 +2016,40 @@ async function extractClaims() {
     const out = parseJsonLoose(gen.text);
     const merged = mergeClaims(out.claims, byDate);
     const applied = applyProposals(out.resolutions, byDate);
-    persistLedger();
-    renderLedger();
+    const found = merged.added + merged.proposed + applied.proposed;
+    if (found) { persistLedger(); renderLedger(); }
+    else renderLedger();
 
     const dropped = merged.dropped + applied.dropped;
     const toJudge = merged.proposed + applied.proposed;
-    toast(
-      `${merged.added} new · ${toJudge} to judge` +
-      (dropped ? ` · ${dropped} rejected (no matching quote)` : ''),
-      'ok'
-    );
+    // Silence only the boring case. A silent run that DID find claims still
+    // says so, otherwise the ledger quietly grows and nothing points at it.
+    if (!opts.silent || found) {
+      toast(
+        `Ledger: ${merged.added} new · ${toJudge} to judge` +
+        (dropped ? ` · ${dropped} rejected (no matching quote)` : ''),
+        'ok'
+      );
+    }
+    // A model that returns nothing at all is the single most confusing outcome,
+    // because it is indistinguishable from the feature being broken. Say which
+    // it is, and point at the likeliest cause.
+    if (!found && !merged.dropped && !applied.dropped && !opts.silent) {
+      const total = claimList().length;
+      toast(
+        total
+          ? 'No NEW claims found — everything quotable is already in the ledger.'
+          : `${picked.model} found no forecasts or commitments to track. Weaker models often return none here; try a stronger model in Settings.`,
+        ''
+      );
+    }
     setLedgerStatus('');
   } catch (e) {
     setLedgerStatus('');
-    toast(e.message, 'err');
+    if (!opts.silent) toast(e.message, 'err');
+    else console.warn('automatic claim extraction failed:', e.message);
   } finally {
-    btn.disabled = false;
+    if (btn) btn.disabled = false;
   }
 }
 
@@ -1708,15 +2201,45 @@ function confirmDialog(title, text) {
 }
 
 /* ============================================================ settings UI */
-function openSettings() { $('#settings-modal').classList.remove('hidden'); }
+// Refill the directive on open: it syncs, so another device may have changed it
+// since this modal was last built.
+function openSettings() {
+  fillAdvicePrompt();
+  $('#settings-modal').classList.remove('hidden');
+}
 function closeSettings() { $('#settings-modal').classList.add('hidden'); }
+
+/* ------------------------------------------------------- advice directive */
+function fillAdvicePrompt() {
+  const ta = $('#set-advice-prompt');
+  if (!ta) return;
+  ta.value = advicePrompt();
+  updateAdviceMeta();
+}
+function updateAdviceMeta() {
+  const ta = $('#set-advice-prompt');
+  const state$ = $('#advice-state');
+  const count = $('#advice-count');
+  if (!ta) return;
+  if (state$) state$.textContent = adviceIsCustom() ? '· customized' : '· default';
+  if (count) count.textContent = `${ta.value.length} chars`;
+}
+function onAdviceInput() {
+  setAdvicePrompt($('#set-advice-prompt').value);
+  updateAdviceMeta();
+}
+function resetAdvicePrompt() {
+  setAdvicePrompt('');
+  fillAdvicePrompt();
+  toast('Advice directive reset to the default.', 'ok');
+}
 
 const CUSTOM_MODEL = '__custom__';
 
 function fillSettings() {
   const c = cfg();
   $('#set-github-token').value = c.githubToken;
-  $('#set-gist-id').value = c.gistId;
+  $('#set-data-token').value = c.dataToken;
   $('#set-provider').value = activeProvider();
   $('#set-openai-key').value = c.openaiKey;
   $('#set-anthropic-key').value = c.anthropicKey;
@@ -1724,6 +2247,10 @@ function fillSettings() {
   $('#set-repo').value = c.repo;
   $('#set-notes-path').value = c.notesPath;
   $('#set-branch').value = c.branch;
+  $('#set-data-repo').value = c.dataRepo;
+  $('#set-data-path').value = c.dataPath;
+  $('#set-data-branch').value = c.dataBranch;
+  fillAdvicePrompt();
   syncProviderUI();
 }
 
@@ -1823,26 +2350,42 @@ async function testConnections() {
   };
   const done = (el, ok, msg) => { el.className = 'test-line ' + (ok ? 'ok' : 'fail'); el.querySelector('span:last-child').textContent = msg; };
 
-  const tGh = line('GitHub token');
+  const tGh = line('Journal token');
   try {
-    const r = await fetch('https://api.github.com/user', { headers: ghHeaders() });
+    const r = await fetch('https://api.github.com/user', { headers: journalHeaders() });
     if (!r.ok) throw new Error(r.status);
     const u = await r.json();
-    done(tGh, true, `GitHub token: ok (@${u.login})`);
-  } catch (e) { done(tGh, false, `GitHub token: failed (${e.message})`); }
-
-  const tGist = line('Gist access');
-  try {
-    const r = await fetch(`https://api.github.com/gists/${encodeURIComponent(cfg().gistId)}`, { headers: ghHeaders() });
-    done(tGist, r.ok, r.ok ? 'Gist access: ok' : `Gist access: failed (${r.status})`);
-  } catch (e) { done(tGist, false, `Gist access: failed`); }
+    done(tGh, true, `Journal token: ok (@${u.login})`);
+  } catch (e) { done(tGh, false, `Journal token: failed (${e.message})`); }
 
   const tRepo = line('Notes file');
   try {
     const { repo, notesPath, branch } = cfg();
-    const r = await fetch(`https://api.github.com/repos/${repo}/contents/${encPath(notesPath)}?ref=${encodeURIComponent(branch)}`, { headers: ghHeaders() });
+    const r = await fetch(`https://api.github.com/repos/${repo}/contents/${encPath(notesPath)}?ref=${encodeURIComponent(branch)}`, { headers: journalHeaders() });
     done(tRepo, r.ok, r.ok ? `Notes file: ok (${notesPath})` : `Notes file: failed (${r.status})`);
   } catch (e) { done(tRepo, false, 'Notes file: failed'); }
+
+  const tData = line('Data token');
+  try {
+    const r = await fetch('https://api.github.com/user', { headers: dataHeaders() });
+    if (!r.ok) throw new Error(r.status);
+    const u = await r.json();
+    done(tData, true, `Data token: ok (@${u.login})`);
+  } catch (e) { done(tData, false, `Data token: failed (${e.message})`); }
+
+  // Separate line from the token check: the token can be valid while simply not
+  // having this repo selected, which is the likeliest setup mistake.
+  const tDataRepo = line('Data repo');
+  try {
+    const { dataRepo, dataPath, dataBranch } = cfg();
+    const r = await fetch(`https://api.github.com/repos/${dataRepo}`, { headers: dataHeaders() });
+    if (!r.ok) throw new Error(`${dataRepo} not reachable (${r.status})`);
+    const f = await fetch(`https://api.github.com/repos/${dataRepo}/contents/${encPath(dataPath)}?ref=${encodeURIComponent(dataBranch)}`, { headers: dataHeaders() });
+    // 404 here is fine and expected before the first sync creates the file.
+    done(tDataRepo, true, f.ok
+      ? `Data repo: ok (${dataPath} found)`
+      : `Data repo: ok (${dataPath} not created yet — first sync will make it)`);
+  } catch (e) { done(tDataRepo, false, `Data repo: failed (${e.message})`); }
 
   // Only the ACTIVE provider is tested — that's the key a report will use.
   const provider = activeProvider();
@@ -1877,13 +2420,16 @@ function hideLock() {
 function bindSettingsInputs() {
   const map = {
     'set-github-token': 'githubToken',
-    'set-gist-id': 'gistId',
+    'set-data-token': 'dataToken',
     'set-openai-key': 'openaiKey',
     'set-anthropic-key': 'anthropicKey',
     'set-gemini-key': 'geminiKey',
     'set-repo': 'repo',
     'set-notes-path': 'notesPath',
     'set-branch': 'branch',
+    'set-data-repo': 'dataRepo',
+    'set-data-path': 'dataPath',
+    'set-data-branch': 'dataBranch',
   };
   for (const [id, key] of Object.entries(map)) {
     $('#' + id).addEventListener('input', (e) => {
@@ -1959,7 +2505,7 @@ function init() {
   // Restore cached Gist data for instant offline view. The cache is a starting
   // point, never the truth — the sync on open merges it against the Gist.
   try {
-    const cached = localStorage.getItem(LS.gistCache);
+    const cached = localStorage.getItem(LS.cache);
     if (cached) state.data = normalizeData(JSON.parse(cached));
   } catch { /* ignore */ }
   state.dirty = localStorage.getItem(LS.dirty) === '1';
@@ -1988,7 +2534,10 @@ function init() {
   // every change, so per-button listeners would be rebound constantly.
   $('#btn-ledger').addEventListener('click', openLedger);
   $$('[data-close-ledger]').forEach((el) => el.addEventListener('click', closeLedger));
-  $('#btn-extract').addEventListener('click', extractClaims);
+  // Arrow-wrapped: a bare listener hands extractClaims the click Event as its
+  // options object, which is harmless today but silently wrong the moment an
+  // option name collides with an Event property.
+  $('#btn-extract').addEventListener('click', () => extractClaims());
   $('#ledger-body').addEventListener('click', (e) => {
     const btn = e.target.closest('[data-claim]');
     if (btn) setVerdict(btn.dataset.claim, btn.dataset.verdict);
@@ -2002,9 +2551,15 @@ function init() {
   $('#btn-delete').addEventListener('click', deleteCurrentReport);
   $('#reflection-input').addEventListener('input', onReflectionInput);
 
+  // Follow-ups. Delegated — the list is rebuilt on every report switch.
+  $('#btn-followups').addEventListener('click', askMoreFollowups);
+  $('#followup-list').addEventListener('input', onFollowupInput);
+
   // Settings actions.
   $('#btn-refresh-models').addEventListener('click', refreshModels);
   $('#btn-test').addEventListener('click', testConnections);
+  $('#set-advice-prompt').addEventListener('input', onAdviceInput);
+  $('#btn-reset-advice').addEventListener('click', resetAdvicePrompt);
 
   // Esc closes whichever modal is open.
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeSettings(); closeLedger(); } });
@@ -2032,7 +2587,7 @@ function init() {
 // Runs once the app is visible (after unlock, or immediately if no lock).
 function onUnlocked() {
   // Auto cloud-sync on open if secrets are present.
-  if (!missingSecrets().includes('token') && !missingSecrets().includes('gist')) {
+  if (canSync()) {
     cloudSync();
   }
 }
