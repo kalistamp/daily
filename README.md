@@ -9,12 +9,19 @@ step — just static HTML/CSS/JS.
 | Thing | Visibility |
 |---|---|
 | These `docs/` static files | **Public** (served via GitHub Pages) |
-| The parent repo (your journal markdown) | **Private** — stays private |
-| The Gist that stores your reports | **Private** — stays private |
-| Your GitHub token / Gist ID / provider API keys | **Only in your browser's localStorage** — never committed anywhere |
+| The journal repo (your markdown) | **Private** — stays private |
+| The data repo (your reports, as JSON) | **Private** — stays private |
+| Both tokens / provider API keys | **Only in your browser's localStorage** — never committed anywhere |
 
-Because the repo and Gist are both private, nobody can read your data without
-**your** GitHub token + Gist ID entered on **your** device.
+Because both repos are private, nobody can read your data without **your** own
+tokens entered on **your** device. GitHub enforces this: an unauthenticated
+request gets `404`, not `403` — it won't even confirm the repos exist.
+
+> **Why not a Gist?** Reports used to live in a "secret" Gist. Secret means
+> *unlisted*, not *access-controlled*: the gist ID is a bearer credential, and
+> anyone holding it can read everything, forever, with no token. Because the ID
+> was hardcoded in this public repo, it was effectively published. A private
+> repo is real access control, so that's where the data lives now.
 
 ## Enable GitHub Pages (you do this once, manually)
 
@@ -26,11 +33,18 @@ Because the repo and Gist are both private, nobody can read your data without
 
 Open **Settings (⚙)** and fill in:
 
-- **GitHub token** — a fine-grained PAT with:
-  - **Contents: Read-only** on this repo (to fetch the journal). The app never
-    writes to the repo, so no write access is needed or wanted.
-  - **Gists: Read and write** (to store reports in the private Gist).
-- **Gist ID** — pre-filled with `ead6fb9238714dfc51d0b3fea495e899`.
+- **Journal token** — a fine-grained PAT scoped to the **journal repo only**,
+  with **Contents: Read-only**. The app never writes your journal, so write
+  access is neither needed nor wanted — with a read-only token, GitHub itself
+  rejects any write, whatever the code does.
+- **Data token** — a *separate* fine-grained PAT scoped to the **data repo
+  only**, with **Contents: Read and write**. Read as well as write: syncing has
+  to read the current file to merge against it.
+
+  > **Why two tokens?** A fine-grained PAT applies one permission set to every
+  > repo it covers. A single token cannot be read-only on the journal and
+  > writable on the data repo — it would have to be writable on both, which
+  > throws away the guarantee that nothing here can touch your journal.
 - **Provider** — choose which service writes the report: **OpenAI** (the
   default), **Anthropic (Claude)**, or **Gemini**. Only **one API-key field is
   shown at a time** — the one for the selected provider. Each provider keeps its
@@ -40,19 +54,23 @@ Open **Settings (⚙)** and fill in:
   - **Anthropic** — <https://console.anthropic.com/settings/keys>
   - **Gemini** — free from <https://aistudio.google.com/apikey>
   Only the selected provider's key is used to generate a report; keys stay in
-  this browser and are **never** committed or synced to the Gist.
+  this browser and are **never** committed or synced to the data repo.
 - **Model** — defaults to **Auto**, which uses the newest chat model your key
   can access, resolved live each time you run a report (so it never goes stale).
   Hit **Refresh** to load the live list and pin a specific model, or pick
   **Custom…** to type an exact model id. The list is discovered from the
   provider — with no key entered you'll only see **Auto** and **Custom**.
 
-Under **Source (advanced)** the repo (`kalistamp/Daily_ng`), notes path
+Under **Journal source (advanced)** the repo (`kalistamp/Daily_ng`), notes path
 (`2026/2026daily_pt1.md`), and branch (`main`) are pre-filled — change the notes
 path each year as your journal file changes.
 
-Hit **Test connections** to verify GitHub, the Gist, the notes file, and the
-selected provider's key before generating.
+Under **Data store (advanced)** the data repo (`kalistamp/daily-data`), file
+path (`monthly-reports.json`), and branch (`main`) are pre-filled. The file is
+created automatically on first sync if it doesn't exist yet.
+
+Hit **Test connections** to verify both tokens, the notes file, the data repo,
+and the selected provider's key before generating.
 
 ## How it works
 
@@ -69,26 +87,81 @@ selected provider's key before generating.
    - adversarial self-audit (4–6)
    - future-self letter (4–6)
    - cross-domain synthesis (4–6)
-4. The report + timestamp + provider/model + theme summary + the exact date
-   range read (first → last entry) is saved to the private Gist. Each report
-   shows the target month alongside that start/end span.
-5. Answer the questions in the **reflection** box — auto-saved to the Gist.
+   - context gaps (4–8)
+   - self-improvement operating plan (3–4 priorities)
+   - **life advice** — the longest section: the pattern you cannot see, the
+     decision being avoided, leverage, the honest risk, what is actually working
+4. A **second pass** turns the report into 6–10 structured **follow-up
+   questions**, each with a theme and a one-line reason it is worth answering.
+5. The **claim ledger** extraction runs automatically off the same journal read.
+6. Everything is saved to the private data repo. Each report shows the target
+   month alongside the exact start/end span that was read.
+7. Answer the follow-ups inline, and anything else in the **reflection** box.
 
-## The repo is strictly read-only
+## Follow-up questions
 
-The app **never writes to the repository.** It only reads `2026/2026daily_pt1.md`
+Each report comes with its own set of questions in an answer box under the
+report. Answer as many as you like, a sentence or two each; they auto-save.
+
+**This is the memory loop.** Every answered question is fed into every later
+run as an established fact, paired with the question that produced it, under a
+hard instruction not to ask anything it already covers. That is what stops the
+model re-asking things you have already explained. Answers are carried by
+character budget rather than a fixed number of reports, so the newest ones
+always make it in and old ones age out only when the budget runs out.
+
+**Ask follow-ups** generates another set for the current report. Existing
+questions — answered or not — are excluded, so a second press produces new
+ground instead of a reshuffle.
+
+## Curating the advice
+
+Settings → **Advice directive** is a prompt you own. It is injected verbatim
+into the report prompt and governs the **self-improvement operating plan** and
+**life advice** sections: the stance advice is written from, what to push on,
+what to never say. Edit it, and the next report follows it.
+
+It ships with a default; **Reset to default** restores it. The directive syncs
+with your reports, so both devices produce the same shape of advice. It is
+deliberately the only editable prompt — the report's section list and the JSON
+contracts elsewhere are parsed by code, so editing those would break parsing
+rather than change the writing.
+
+## Claim ledger
+
+The ledger tracks **forecasts** ("this breaks by Q3") and **commitments** ("going
+to ship the adapter") pulled out of the journal, then scores them against later
+entries. Every claim and every resolution has to carry a quote that actually
+occurs in the entry it names, so a model cannot confabulate one.
+
+It now runs **automatically after every report**, off the journal that was
+already fetched. Previously it only ran from the **Extract from journal** button
+inside the ledger modal, which is why it could sit empty through months of
+reports — nothing populated it unless you found that button.
+
+Two things worth knowing:
+
+- **Model strength matters a lot here.** On the same journal, a strong model
+  returned 22 valid claims and a small one returned zero. If the ledger comes
+  back empty, that is the first thing to check.
+- **An empty result is not always a failure.** The ledger deliberately skips
+  pure logging — a day's worth of archived links contains no falsifiable claims.
+  The status message now distinguishes "found nothing to track" from "found
+  nothing new" from "rejected N for unmatched quotes".
+
+## The journal is strictly read-only
+
+The app **never writes your journal.** It only reads `2026/2026daily_pt1.md`
 via `GET`; that file is never written, modified, or deleted. Guaranteed two ways:
 
-- **No write code exists.** The former "Commit to repo" feature was removed, so
-  there is no `PUT`/`PATCH`/`DELETE` against any repo path anywhere in
-  `script.js`. The only GitHub write the app makes is a `PATCH` to the private
-  **Gist** (`gistPushNow`). You can confirm with a one-line audit:
-  `grep -nE "method: *'(PUT|PATCH|DELETE)'" script.js` → the only match is the
-  Gist `PATCH`.
-- **The token can't write anyway.** Use a fine-grained PAT scoped to
-  **Contents: Read-only** (+ **Gists: Read and write**). GitHub itself then
-  rejects any repo write — the journal can't be touched even by a bug or a
-  compromised page. This is the recommended setup and needs no repo write access.
+- **The only write targets the data repo.** There is exactly one write in
+  `script.js` — the `PUT` in `dataPushNow`, against the data repo. Audit it:
+  `grep -nE "method: *'(PUT|PATCH|DELETE)'" script.js` → one match, and the URL
+  it uses is built from `dataRepo`, never from `repo`.
+- **The journal token can't write anyway.** It is scoped **Contents:
+  Read-only**, so GitHub rejects any write to the journal — even from a bug or a
+  compromised page. The write-capable data token has no access to the journal
+  repo at all. The two are never interchanged; that is why there are two.
 
 ## Optional device lock
 
@@ -100,19 +173,25 @@ access.
 ## Using more than one device
 
 Phone and laptop can both generate reports. Sync **merges**; it does not
-overwrite. Every push pulls the Gist first and writes the union of both sides,
-so a device opening with a stale cache can no longer wipe out reports another
-device made in the meantime. Per report, the most recently edited copy wins
-(that's what keeps reflections from going backwards), and deleting a report
+overwrite. Every push pulls the data file first and writes the union of both
+sides, so a device opening with a stale cache can no longer wipe out reports
+another device made in the meantime. Per report, the most recently edited copy
+wins (that's what keeps reflections from going backwards), and deleting a report
 records a tombstone so it stays deleted instead of returning from the other
 device's cache.
 
+Writes are also **conditional**: each one quotes the file's current `sha`. If
+another device wrote in between, GitHub rejects it with `409` and the app
+re-pulls, re-merges and retries — so a genuine race costs a round trip instead
+of somebody's reports.
+
 If a device is offline when you generate a report, it remembers it still owes
-the Gist a write and pushes on the next open.
+the data repo a write and pushes on the next open.
 
 ## Notes
 
-- Everything is stored in your browser + your private Gist. Clearing browser data
-  removes your keys (the reports remain safe in the Gist).
+- Everything is stored in your browser + your private data repo. Clearing
+  browser data removes your keys (the reports remain safe in the data repo, and
+  its git history keeps every previous version).
 - No external libraries or CDNs — fully self-contained and offline-capable for
   viewing cached reports.
