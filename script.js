@@ -234,6 +234,19 @@ function idSet(d) {
   return new Set([...n.reports, ...n.claims, ...n.deleted].map((x) => x.id));
 }
 
+// The report text and everything describing how it was produced move together,
+// and are chosen by GENERATION time — not by the wrapper's last-touched stamp.
+// This only started to matter with in-place regeneration: report text used to
+// be write-once, so whichever wrapper won carried the same text either way. Now
+// a device that merely ANSWERED a question on a stale copy has the newer
+// last-touched stamp, and without this it drags the old text back over a
+// rewrite it has not pulled yet.
+const GEN_FIELDS = [
+  'report', 'generatedAt', 'regeneratedAt', 'regenCount', 'answersUsed',
+  'provider', 'model', 'modelAuto', 'themes', 'themeSummary', 'entryCount',
+  'requestedStart', 'requestedEnd', 'rangeStart', 'rangeEnd',
+];
+
 // Picking one whole report and discarding the other loses answers: two devices
 // can answer DIFFERENT follow-ups on the same report, and a wholesale winner
 // throws away every answer the loser held. So the report wrapper is chosen by
@@ -246,6 +259,9 @@ function mergeReportPair(a, b) {
     out.reflection = other.reflection;
     out.reflectionUpdatedAt = other.reflectionUpdatedAt;
   }
+  // Only when the two winners disagree, so identical copies stay untouched.
+  const gen = (a.generatedAt || '') >= (b.generatedAt || '') ? a : b;
+  if (gen !== base) for (const k of GEN_FIELDS) out[k] = gen[k];
   out.followups = mergeById(base.followups || [], other.followups || [], followupStamp);
   return out;
 }
@@ -1555,6 +1571,17 @@ function renderReport(r) {
   const modelText = r.provider ? `${providerLabel(r.provider)} · ${r.model}` : r.model;
   $('#meta-model').textContent = modelText + (r.modelAuto ? ' (auto)' : '');
   $('#meta-date').textContent = fmtDate(r.generatedAt);
+  // Provenance for a rewritten report: generatedAt moves on regeneration, so
+  // without this the report looks like a first pass that simply ran late.
+  const revEl = $('#meta-revised');
+  if (r.regenCount) {
+    revEl.textContent =
+      `revised ×${r.regenCount} · ${r.answersUsed || 0} answer${r.answersUsed === 1 ? '' : 's'} used`;
+    revEl.classList.remove('hidden');
+  } else {
+    revEl.textContent = '';
+    revEl.classList.add('hidden');
+  }
   const tags = $('#theme-tags');
   tags.innerHTML = '';
   (r.themes || []).slice(0, 6).forEach((t) => {
@@ -1661,6 +1688,118 @@ async function askMoreFollowups() {
     renderFollowups(r);
     await flushPushImmediate();
     toast(`${fresh.length} new follow-up question${fresh.length === 1 ? '' : 's'}.`, 'ok');
+  } catch (e) {
+    toast(e.message, 'err');
+  } finally {
+    btn.disabled = false;
+    showProgress(false);
+  }
+}
+
+/* --------------------------------------------------- regenerate in place */
+/* ---------------------------------------------------------------------------
+   Re-runs a month that already has a report, with the answers to ITS OWN
+   follow-ups now in the prompt as established fact. Until this existed, the
+   only way to see answers land was to generate the month again, which stacked
+   a second report beside the first.
+
+   Updates in place, keeping the id. A duplicate month report is not a second
+   month of thinking, and `answeredContextBlock` is capped by CHARACTERS — the
+   same Q&A pairs carried twice would spend that budget saying one thing twice.
+
+   Follow-ups are APPENDED, never replaced. mergeReportPair unions them by id,
+   so a question dropped here returns from any device still holding the old
+   copy; keeping them is the only choice stable under sync, and it is what keeps
+   every answer feeding future reports.
+--------------------------------------------------------------------------- */
+async function regenerateWithAnswers() {
+  const r = currentReport();
+  if (!r) return;
+  const miss = missingSecrets();
+  if (miss.length) {
+    toast('Missing keys: ' + miss.join(', ') + '. Opening Settings.', 'err');
+    openSettings();
+    return;
+  }
+  const answered = (r.followups || []).filter((f) => f.a && f.a.trim()).length;
+  if (!answered) {
+    toast('Answer at least one follow-up first — there is nothing new to feed the model yet.', '');
+    return;
+  }
+  const ok = await confirmDialog(
+    'Regenerate with answers',
+    `Rewrite the ${r.month} report using your ${answered} answered follow-up${answered === 1 ? '' : 's'} as ` +
+    `established fact? The report text is replaced. Your answers are kept, and new questions are added below them.`
+  );
+  if (!ok) return;
+
+  const btn = $('#btn-regen');
+  btn.disabled = true;
+  // An answer typed a second ago is already in state.data — onFollowupInput
+  // writes through synchronously — so the prompt is current. The pending
+  // debounce is only a duplicate push racing the one at the end of this run.
+  clearTimeout(state.followupTimer);
+  showProgress(true, 'Fetching journal…');
+  try {
+    const entries = parseEntries(await githubFetchNotes());
+    const reqStart = r.requestedStart || r.rangeStart;
+    const reqEnd = r.requestedEnd || r.rangeEnd;
+    const slice = sliceForRange(entries, reqStart, reqEnd);
+    if (!slice.length) {
+      throw new Error(`No entries found for ${reqStart} → ${reqEnd} in ${cfg().notesPath}.`);
+    }
+    // Re-derived, not reused: the journal may have gained entries in this range
+    // since the first pass, and the theme tags are shown on the report.
+    showProgress(true, 'Analyzing themes…');
+    const themes = analyzeThemes(slice.map((e) => e.body).join('\n'));
+    const loops = findOpenLoops(slice);
+
+    const provider = r.provider && PROVIDERS[r.provider] ? r.provider : activeProvider();
+    const picked = await resolveModel(provider, (t) => showProgress(true, t));
+    showProgress(true, `Interrogating ${picked.model}…`);
+    // buildUserPrompt pulls answeredContextBlock() itself — that is the whole
+    // mechanism. The answers arrive under ALREADY ANSWERED as fact.
+    const gen = await providerGenerate(
+      provider, picked.model, buildSystemPrompt(),
+      buildUserPrompt(r.month, slice, themes, loops),
+      (m, fb) => showProgress(true, `${fb ? 'Falling back to' : 'Interrogating'} ${m}…`)
+    );
+    if (gen.fellBack) toast(`"${picked.model}" unavailable — used "${gen.model}" instead.`, 'ok');
+
+    showProgress(true, 'Drafting follow-up questions…');
+    const existing = new Set((r.followups || []).map((f) => normQuote(f.q)));
+    const fresh = (await generateFollowups(
+      provider, gen.model, gen.text, slice, r.month,
+      (m, fb) => showProgress(true, `${fb ? 'Falling back to' : 'Drafting questions with'} ${m}…`)
+    )).filter((f) => !existing.has(normQuote(f.q)));
+
+    r.report = gen.text;
+    r.provider = provider;
+    r.model = gen.model;
+    r.modelAuto = !!picked.auto;
+    r.themes = themes;
+    r.themeSummary = themes.length ? themes.slice(0, 4).map((t) => t.label).join(', ') : 'none detected';
+    r.entryCount = slice.length;
+    r.rangeStart = slice[0].date;
+    r.rangeEnd = slice[slice.length - 1].date;
+    r.followups = [...(r.followups || []), ...fresh];
+    r.answersUsed = answered;
+    r.regenCount = (r.regenCount || 0) + 1;
+    r.regeneratedAt = new Date().toISOString();
+    // generatedAt moves with it: reportStamp resolves merge conflicts on the
+    // newest timestamp, so leaving it would let a stale copy on another device
+    // outrank this rewrite and quietly restore the old text.
+    r.generatedAt = r.regeneratedAt;
+
+    saveLocal();
+    renderReport(r);
+    renderHistory();
+    await flushPushImmediate();
+    toast(
+      `${r.month} rewritten with ${answered} answer${answered === 1 ? '' : 's'}` +
+      (fresh.length ? ` · ${fresh.length} new question${fresh.length === 1 ? '' : 's'}` : ''),
+      'ok'
+    );
   } catch (e) {
     toast(e.message, 'err');
   } finally {
@@ -2553,6 +2692,7 @@ function init() {
 
   // Follow-ups. Delegated — the list is rebuilt on every report switch.
   $('#btn-followups').addEventListener('click', askMoreFollowups);
+  $('#btn-regen').addEventListener('click', regenerateWithAnswers);
   $('#followup-list').addEventListener('input', onFollowupInput);
 
   // Settings actions.
