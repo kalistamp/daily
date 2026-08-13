@@ -149,6 +149,7 @@
                 <span class="meta-chip" id="meta-range"></span>
                 <span class="meta-chip" id="meta-model"></span>
                 <span class="meta-chip" id="meta-date"></span>
+                <span class="meta-chip hidden" id="meta-revised"></span>
               </div>
               <div class="theme-tags" id="theme-tags"></div>
             </div>
@@ -165,11 +166,16 @@
             <div class="card-head">
               <h3 class="card-title">Follow-up questions</h3>
               <span id="followup-status" class="muted tiny"></span>
-              <button id="btn-followups" class="btn btn-ghost btn-mini" title="Generate more follow-up questions">Ask follow-ups</button>
+              <div class="fu-actions">
+                <button id="btn-regen" class="btn btn-ghost btn-mini" title="Rewrite this month's report using your answers">Regenerate with answers</button>
+                <button id="btn-followups" class="btn btn-ghost btn-mini" title="Generate more follow-up questions">Ask follow-ups</button>
+              </div>
             </div>
             <p class="followup-note muted tiny">
-              Answers are fed into every future report as established fact, so the
-              model stops re-asking what you have already told it.
+              Answers save as you type, and are fed into every future report as
+              established fact so the model stops re-asking what you have already
+              told it. <strong>Regenerate with answers</strong> rewrites this
+              month's report with them in place — answers are kept either way.
             </p>
             <ul id="followup-list" class="followup-list"></ul>
           </div>
