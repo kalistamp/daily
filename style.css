@@ -340,6 +340,28 @@ input[type="month"], input[type="number"] { font-family: var(--mono); }
 .markdown strong { color: var(--text); font-weight: 700; }
 .markdown a { text-decoration: underline; }
 
+/* ---------------------------------------------------- collapsible report */
+/* Section headings move from <h2> into <summary>, so the h2 styling above no
+   longer reaches them — .rsec-t carries that weight instead. */
+.rsec { border-bottom: 1px solid var(--border); }
+.rsec:last-child { border-bottom: none; }
+.rsec > summary {
+  display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+  padding: 14px 0; cursor: pointer; list-style: none; user-select: none;
+}
+.rsec > summary::-webkit-details-marker { display: none; }
+.rsec > summary::before {
+  content: "\25B8"; color: var(--amber); font-size: 13px;
+  display: inline-block; transition: transform .15s ease;
+}
+.rsec[open] > summary::before { transform: rotate(90deg); }
+.rsec:first-child > summary { padding-top: 0; }
+.rsec-t { font-size: 19px; font-weight: 700; letter-spacing: -.01em; color: var(--text); }
+.rsec > summary:hover .rsec-t { color: var(--amber-soft); }
+.rsec-m { font-family: var(--mono); font-size: 11px; color: var(--muted); margin-left: auto; }
+.rsec-b { padding: 0 0 18px; }
+.rsec-b > :first-child { margin-top: 0; }
+
 /* reflection */
 .reflection {
   background: var(--surface); border: 1px solid var(--border);
