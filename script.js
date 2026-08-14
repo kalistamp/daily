@@ -926,6 +926,11 @@ const DEFAULT_ADVICE_PROMPT = [
   '',
   'Bias toward: finishing over starting, deciding over researching, one thing well over five things partially.',
   'When the entries show a long-running avoidance, name it directly and say what it is costing.',
+  '',
+  'Length discipline:',
+  '- make the point, support it with the dated evidence, stop. do not restate it in different words.',
+  '- one fully-argued recommendation beats three sketched ones. depth on the thing that matters, silence on the rest.',
+  '- no throat-clearing. no sentence whose only job is to announce the next sentence.',
 ].join('\n');
 
 // The user's edit if there is one, else the default. Kept as a function so a
@@ -963,68 +968,53 @@ function buildSystemPrompt() {
     '- reference concrete specifics from the entries (projects, decisions, numbers, names) instead of generic prompts.',
     '',
     'Output EXACTLY these Markdown sections, in this order, using `##` headings:',
-    '## executive overview',
-    '  - 3–5 tight sentences: the month\'s dominant thread, what genuinely progressed, what quietly stalled, and the gap between stated intent and actual behavior.',
-    '  - close with one blunt verdict sentence — what this month bought them, or what it cost.',
+    '## the month in five bullets',
+    '  - HARD CAP 110 words. this is the skim layer: if they read nothing else in the report, they still got the month.',
+    '  - exactly 5 bullets, one line each, in this order: the dominant thread, what genuinely progressed, what quietly stalled, the decision being avoided, the single highest-value action.',
+    '  - then one blunt verdict line prefixed `**verdict:**` — what this month bought them, or what it cost.',
     '  - cite specifics (projects, dates, numbers, decisions). if the entries are thin, say that plainly instead of inflating them.',
-    '## theme-weighted question bank',
-    '  - 8–12 questions, allocated by the theme weights supplied below — the heaviest theme gets the most questions, not an even split.',
-    '  - prefix each with its theme in brackets, e.g. `[ai]`. add a theme the local keyword scan missed if the entries support it.',
-    '  - include at least one question about a theme that is conspicuously thin or absent this month — what dropped off, and whether that was a choice.',
-    '  - no two questions may probe the same thing from a different angle.',
-    '## contradiction / open-loop detector',
-    '  - 4–6 questions aimed at contradictions, abandoned threads, and commitments made and never closed.',
-    '  - work from the detected open-loop list below AND anything it missed — it is a keyword scan, not a judgment.',
-    '  - each question must name the thing it comes from: the dated commitment, the abandoned thread, or the two entries that contradict each other.',
-    '## adversarial self-audit',
-    '  - 4–6 questions in the voice of someone who has read every entry, remembers what was promised, and is not impressed.',
-    '  - attack the reasoning, the priorities, and the excuses — quote the actual justification from the entries before puncturing it.',
-    '  - no invented flaws. if the entries do not support the critique, do not make it.',
-    '## future-self letter',
-    '  - 4–6 questions written by them 3–6 months out, looking back at this month — "why did you…", "did you ever…".',
-    '  - write from two versions of them: the one who followed through on what is live in these entries, and the one who let it slide. label which is which.',
-    '  - each question must hang on a real decision, bet, or thread from the entries. no generic regrets, no gentleness.',
-    '## cross-domain synthesis',
-    '  - 4–6 questions that force connections between domains the entries keep separate (e.g. a sleep pattern against a career decision).',
-    '  - name the evidence on both sides of the link before drawing it. two vague trends are not a connection.',
-    '  - ask whether the link is real, not whether it sounds clever. do not manufacture correlation the entries cannot support.',
-    '## context gaps',
-    '  - 4–8 direct factual questions about what the entries reference but never explain: shorthand, names, projects, decisions that appear with no stated reason.',
-    '  - name the specific dates with no entries and ask what happened in them.',
-    '  - these are for filling in the record, not for reflection. a one line answer should be enough for each.',
-    '  - close with a `### write this down next month` list: 2–3 things that, logged even one line a day, would have made this report materially sharper.',
-    '  - never ask anything the entries or the established context already answer.',
+    '## the five questions that matter',
+    '  - HARD CAP 90 words. EXACTLY 5 questions, one list item each. no sub-bullets, no preamble, no closing note.',
+    '  - a SEPARATE pass generates the questions they actually answer, so do not try to be exhaustive here. pick the 5 whose answers would most change what next month looks like.',
+    '  - cover five different angles, one question each: a contradiction between two dated entries; a commitment made and never closed; a stated priority that does not survive scrutiny; a theme conspicuously thin or absent this month; the decision the entries keep circling without making.',
+    '  - prefix each with its theme in brackets, e.g. `[ai]`. name the specific thing — the project, the date, the number, the person. a question that could be asked of any journal is worthless here.',
+    '  - no two may probe the same thing from a different angle. no generic regrets, no gentleness.',
     '## self-improvement operating plan',
-    '  - turn the month\'s most important observations into a realistic 30-day plan. this section is advice, not questions.',
-    '  - pick 3–4 priorities, no more. favor unfinished commitments, recurring friction, and choices with real downstream impact.',
-    '  - one `###` heading per priority, then these bullets with the labels bolded exactly as written:',
+    '  - HARD CAP 240 words. turn the month\'s most important observations into a realistic 30-day plan. this section is advice, not questions.',
+    '  - EXACTLY 3 priorities, no more. favor unfinished commitments, recurring friction, and choices with real downstream impact.',
+    '  - one `###` heading per priority, then exactly these four bullets, labels bolded exactly as written:',
     '    - **why now:** the evidence from the entries, with a date.',
     '    - **7-day move:** one action they can finish this week.',
-    '    - **30-day target:** the outcome to hit before the next report.',
-    '    - **weekly rhythm:** the minimum recurring habit, review, or time block.',
-    '    - **measurement:** how they will know progress is real and not just felt.',
-    '    - **if/then:** the likely obstacle and the pre-decided response.',
+    '    - **measurement:** the observable outcome before the next report — how they will know progress is real and not just felt.',
     '    - **what this costs:** what gets less attention because this got more. every priority displaces something.',
-    '  - close with a `### stop doing` block: one tempting, lower-value activity to cut, defer, or cap — and what it frees up.',
+    '  - close with a one-line `### stop doing` block: one tempting, lower-value activity to cut, defer, or cap — and what it frees up.',
     '  - practical only. no pep talk, no advice the entries do not support.',
     '## life advice',
-    '  - the longest and most substantial section of the report. write it as prose with `###` subheadings, not as a bullet dump.',
-    '  - this is the section they actually came for. spend real words here — several paragraphs per subheading, not one-liners.',
+    '  - HARD CAP 470 words for this whole section. still the most substantial part of the report — prose with `###` subheadings, not a bullet dump.',
+    '  - this is the section they actually came for, but density beats volume: make the point, support it with dated evidence, stop. a paragraph restating the previous one in different words is padding — cut it.',
     '  - use these five `###` subheadings, written EXACTLY as shown (they address the reader as "you", like the rest of the report):',
-    '    - `### the pattern you cannot see` — the thing recurring across months that is invisible from inside it. name it, show the dated evidence, say where it leads if nothing changes.',
-    '    - `### the decision being avoided` — the choice the entries keep circling without making. state it plainly, lay out the real options with their actual costs, and say which one you would take and why.',
-    '    - `### leverage` — where a small change compounds. be specific about the mechanism, not just the suggestion.',
-    '    - `### the honest risk` — what is most likely to go wrong in the next 6–12 months given these entries. not catastrophizing; the realistic failure mode, and the cheapest hedge against it.',
-    '    - `### what is actually working` — the thing they are underrating and should do more of. evidence-based, not consolation.',
+    '    - `### the pattern you cannot see` (≤130 words) — the thing recurring across months that is invisible from inside it. name it, show the dated evidence, say where it leads if nothing changes.',
+    '    - `### the decision being avoided` (≤130 words) — the choice the entries keep circling without making. state it plainly, lay out the real options with their actual costs, and say which one you would take and why.',
+    '    - `### leverage` (≤70 words) — where a small change compounds. be specific about the mechanism, not just the suggestion.',
+    '    - `### the honest risk` (≤70 words) — what is most likely to go wrong in the next 6–12 months given these entries. not catastrophizing; the realistic failure mode, and the cheapest hedge against it.',
+    '    - `### what is actually working` (≤70 words) — the thing they are underrating and should do more of. evidence-based, not consolation.',
+    '  - the first two carry the weight. the last three are one tight paragraph each — if a point is made in two sentences, stop at two.',
     '  - if a subheading has nothing real behind it, keep the heading and say in one line that the entries do not support it. do not invent material to fill it.',
     '  - where the entries are about work, money, health, or relationships, engage with the substance. do not retreat to process advice.',
     '  - argue for your recommendations. show the reasoning so they can disagree with it on the merits.',
+    '## write this down next month',
+    '  - HARD CAP 60 words. 2–3 bullets: things that, logged even one line a day, would have made this report materially sharper.',
+    '  - name what was missing and why it mattered — a stretch of undated days, a decision with no stated reason, a project referenced only by shorthand.',
     '',
     'ADVICE DIRECTIVE — governs `## self-improvement operating plan` and `## life advice`.',
     'This is written by the user and overrides the tone guidance above for those two sections where they conflict:',
     '<<<ADVICE_DIRECTIVE>>>',
     '',
-    'Rules: output only the report as Markdown. no preamble, no closing note. exactly the nine `##` sections above, in that order. every question goes on its own line as a list item.',
+    'LENGTH IS A HARD REQUIREMENT, not a suggestion. The whole report must come in under 1000 words.',
+    'The per-section caps above are ceilings, not targets — come in under them whenever the entries do not justify the words.',
+    'A shorter report that says something is strictly better than a longer one that pads. Cut throat-clearing, restatement, and any sentence that only announces what the next sentence will say.',
+    '',
+    'Rules: output only the report as Markdown. no preamble, no closing note. exactly the five `##` sections above, in that order. every question goes on its own line as a list item.',
   ].join('\n').replace('<<<ADVICE_DIRECTIVE>>>', advicePrompt());
 }
 
@@ -1260,6 +1250,66 @@ function mdToHtml(md) {
     const para = [line]; i++;
     while (i < lines.length && !/^\s*$/.test(lines[i]) && !isBlockStart(lines[i])) { para.push(lines[i]); i++; }
     html += `<p>${mdInline(para.join(' '))}</p>`;
+  }
+  return html;
+}
+
+/* ------------------------------------------------------ collapsed report */
+/* ---------------------------------------------------------------------------
+   Every `##` section becomes a <details>. Shortening the prompt trades depth
+   for skimmability; folding trades nothing — the full text is one click away,
+   so the report can stay substantial without costing a 12-minute read.
+
+   Deliberately generic over heading text: reports generated before the prompt
+   was cut down have different section names (and nine of them), and they still
+   have to render. Anything without `##` headings falls through to plain
+   rendering rather than being swallowed.
+--------------------------------------------------------------------------- */
+// The summary and the advice — the two meant to be READ, not referred back to.
+// `executive overview` is the pre-cut name for the summary section.
+const OPEN_SECTIONS = /^(the month in five bullets|executive overview|life advice)$/;
+
+// Collapsed sections advertise their own weight, so skipping one is a choice
+// rather than a guess.
+function sectionMeta(body) {
+  const w = (body.trim().match(/\S+/g) || []).length;
+  const q = body.split('\n').filter((l) => /^\s*([-*+]|\d+[.)])\s/.test(l) && l.includes('?')).length;
+  return q ? `${q} question${q === 1 ? '' : 's'} · ${w} words` : `${w} words`;
+}
+
+// A bare /\n(?=##\s)/ split cuts inside fenced code blocks: it invents a
+// section from the fenced line AND leaves the block unterminated, which renders
+// as an EMPTY <pre>. Toggle on fences exactly the way mdToHtml does, so the two
+// always agree on what counts as code.
+function splitSections(src) {
+  const out = [];
+  let cur = [], inFence = false;
+  for (const line of src.split('\n')) {
+    if (/^```/.test(line)) inFence = !inFence;
+    else if (!inFence && /^##\s/.test(line) && cur.length) { out.push(cur.join('\n')); cur = []; }
+    cur.push(line);
+  }
+  if (cur.length) out.push(cur.join('\n'));
+  return out;
+}
+
+function reportToHtml(md) {
+  const src = (md || '').replace(/\r\n/g, '\n');
+  const parts = splitSections(src);
+  if (!parts.some((p) => /^##\s/.test(p))) return mdToHtml(src);
+  let html = '';
+  for (const part of parts) {
+    const m = part.match(/^##\s+(.+)/);
+    if (!m) { html += mdToHtml(part); continue; }   // anything before the first ##
+    const title = m[1].trim();
+    const nl = part.indexOf('\n');
+    const body = nl === -1 ? '' : part.slice(nl + 1);
+    const open = OPEN_SECTIONS.test(title.toLowerCase()) ? ' open' : '';
+    html +=
+      `<details class="rsec"${open}>` +
+      `<summary><span class="rsec-t">${mdInline(title)}</span>` +
+      `<span class="rsec-m">${sectionMeta(body)}</span></summary>` +
+      `<div class="rsec-b">${mdToHtml(body)}</div></details>`;
   }
   return html;
 }
@@ -1590,7 +1640,7 @@ function renderReport(r) {
     s.textContent = `${t.label} · ${t.score}`;
     tags.appendChild(s);
   });
-  $('#report-body').innerHTML = mdToHtml(r.report);
+  $('#report-body').innerHTML = reportToHtml(r.report);
   renderFollowups(r);
   $('#reflection-input').value = r.reflection || '';
   $('#reflection-status').textContent = r.reflectionUpdatedAt ? 'saved ' + fmtDate(r.reflectionUpdatedAt) : 'auto-saves';
