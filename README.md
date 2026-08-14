@@ -80,19 +80,19 @@ and the selected provider's key before generating.
 2. A light **local** pass detects dominant themes and open loops.
 3. A precise system prompt + the month's slice is sent to your selected
    provider's model (OpenAI, Anthropic, or Gemini), which returns one Markdown
-   report:
-   - executive overview
-   - theme-weighted question bank (8–12)
-   - contradiction / open-loop detector (4–6)
-   - adversarial self-audit (4–6)
-   - future-self letter (4–6)
-   - cross-domain synthesis (4–6)
-   - context gaps (4–8)
-   - self-improvement operating plan (3–4 priorities)
-   - **life advice** — the longest section: the pattern you cannot see, the
-     decision being avoided, leverage, the honest risk, what is actually working
+   report — five sections, each under a hard word cap, ~1000 words total:
+   - the month in five bullets (≤110) — the skim layer, closing on a verdict line
+   - the five questions that matter (≤90) — exactly five, one per angle
+   - self-improvement operating plan (≤240) — 3 priorities × why now / 7-day
+     move / measurement / what this costs, closing on `stop doing`
+   - **life advice** (≤470) — the substantial section: the pattern you cannot
+     see, the decision being avoided, leverage, the honest risk, what is
+     actually working
+   - write this down next month (≤60)
 4. A **second pass** turns the report into 6–10 structured **follow-up
    questions**, each with a theme and a one-line reason it is worth answering.
+   The report deliberately asks only five questions of its own: interrogation
+   lives in the follow-ups, where answers are trackable and feed forward.
 5. The **claim ledger** extraction runs automatically off the same journal read.
 6. Everything is saved to the private data repo. Each report shows the target
    month alongside the exact start/end span that was read.
@@ -113,6 +113,20 @@ always make it in and old ones age out only when the budget runs out.
 **Ask follow-ups** generates another set for the current report. Existing
 questions — answered or not — are excluded, so a second press produces new
 ground instead of a reshuffle.
+
+**Regenerate with answers** rewrites the current month's report with your
+answers to it now counted as established fact, updating it in place rather than
+stacking a second report for the same month. Answers are kept and new questions
+are appended below them, so nothing you have written is lost — and everything
+you have answered keeps feeding future reports either way.
+
+## Reading a report
+
+Each `##` section is collapsible. The summary and **life advice** open by
+default; the rest fold, showing their word and question counts so skipping one
+is a choice rather than a guess. Nothing is truncated — the full text is always
+one click away, which is what lets the report stay substantial without costing
+a twelve-minute read.
 
 ## Curating the advice
 
