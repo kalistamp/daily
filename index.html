@@ -1,30 +1,6 @@
 <!DOCTYPE html>
-<!--
-  ============================================================================
-  Monthly Self-Interrogation Agent
-  ============================================================================
-  PRIVACY MODEL (read this):
-    - This is a PURE client-side app. There is no server. Everything runs in
-      the visitor's browser.
-    - Only the static files in this `docs/` folder are ever public (via GitHub
-      Pages). The parent repository that holds the private daily-journal
-      markdown stays 100% PRIVATE.
-    - All persistent data (generated reports + metadata) is stored as JSON in a
-      SEPARATE PRIVATE REPO. GitHub enforces that access: an unauthenticated
-      read returns 404. This replaced a secret Gist, which had no access
-      control at all -- a gist ID is a bearer credential, and anyone holding it
-      could read everything.
-    - TWO tokens: the journal token is Contents:READ-ONLY, so nothing here can
-      write the journal; the data token is read/write on the data repo ONLY.
-    - Secrets (both tokens, per-provider API keys, selected provider
-      + model) live EXCLUSIVELY in this browser's localStorage. They are NEVER
-      written into any file in this public `docs/` folder, and never leave the
-      browser except in direct HTTPS calls to api.github.com and, for the
-      selected provider, api.openai.com / api.anthropic.com / generativelanguage.googleapis.com.
-    - Because both repos are private, nobody can read any of your data without
-      YOUR own tokens entered on YOUR machine.
-  ============================================================================
--->
+<!-- Reports sync through the `daily` Supabase schema. Journal/provider keys
+     remain device-local and are never stored in Supabase. -->
 <html lang="en" data-theme="dark">
 <head>
   <meta charset="UTF-8" />
@@ -35,6 +11,19 @@
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#129504;</text></svg>" />
 </head>
 <body>
+
+  <!-- ========================== SUPABASE LOGIN ========================= -->
+  <div id="auth-screen" class="lock-screen" aria-hidden="false">
+    <form id="auth-form" class="lock-card">
+      <div class="lock-glyph">&#129504;</div>
+      <h1>Monthly Self-Interrogation</h1>
+      <p class="muted">Sign in to your private reports.</p>
+      <input type="email" id="auth-email" placeholder="Email" autocomplete="username" required />
+      <input type="password" id="auth-password" placeholder="Password" autocomplete="current-password" required />
+      <button type="submit" class="btn btn-primary btn-block" id="auth-submit">Sign in</button>
+      <p id="auth-error" class="lock-error hidden"></p>
+    </form>
+  </div>
 
   <!-- ===================== OPTIONAL PASSWORD GATE ======================= -->
   <!-- Light over-the-shoulder gate only. NOT real security: secrets already
@@ -51,7 +40,7 @@
   </div>
 
   <!-- ============================ APP SHELL ============================= -->
-  <div id="app" class="app">
+  <div id="app" class="app hidden">
 
     <header class="topbar">
       <div class="brand">
@@ -66,12 +55,13 @@
         <div id="sync-status" class="sync-status" title="Cloud sync status">
           <span class="dot"></span><span class="sync-label">not synced</span>
         </div>
-        <button id="btn-sync" class="btn btn-ghost" title="Pull &amp; push the private data repo">
+        <button id="btn-sync" class="btn btn-ghost" title="Synchronize with Supabase">
           <span class="ico">&#8635;</span><span class="btn-label">Cloud Sync</span>
         </button>
         <button id="btn-ledger" class="btn btn-icon" title="Claims ledger">&#9878;</button>
         <button id="btn-theme" class="btn btn-icon" title="Toggle light / dark">&#9681;</button>
         <button id="btn-settings" class="btn btn-icon" title="Settings">&#9881;</button>
+        <button id="btn-signout" class="btn btn-icon" title="Sign out">&#10162;</button>
       </div>
     </header>
 
@@ -118,8 +108,8 @@
         </div>
 
         <p class="privacy-note muted">
-          Both repos stay <strong>private</strong>. Only these static
-          <code>docs/</code> files are public. Secrets live only in this browser.
+          Reports are protected by Supabase Auth and Row Level Security.
+          Journal and provider keys stay only in this browser.
         </p>
       </aside>
 
@@ -135,7 +125,7 @@
           </p>
           <ul class="checklist" id="setup-checklist">
             <li data-check="token"><span class="chk"></span> Journal token</li>
-            <li data-check="datatoken"><span class="chk"></span> Data token</li>
+            <li data-check="account"><span class="chk"></span> Supabase account</li>
             <li data-check="apikey"><span class="chk"></span> Provider API key</li>
           </ul>
         </section>
@@ -208,16 +198,9 @@
         <section class="settings-section">
           <h3 class="settings-heading">Cloud sync</h3>
           <p class="settings-help muted">
-            Stored only in this browser (localStorage). Nothing here is ever
-            committed to the public <code>docs/</code> folder.
-          </p>
-
-          <p class="settings-help muted">
-            Two separate tokens, on purpose. The journal token is
-            <strong>read-only</strong>, so nothing here can modify your journal
-            even by mistake &mdash; GitHub refuses the write. A fine-grained PAT
-            applies one permission set to every repo it covers, so a single
-            token cannot be read-only on one repo and writable on another.
+            Reports and claims sync to the isolated <code>daily</code> Supabase
+            schema. Account: <strong id="cloud-account">not signed in</strong>.
+            The journal and provider keys below remain device-local.
           </p>
 
           <label class="field">
@@ -228,15 +211,6 @@
             </div>
             <span class="field-hint">Contents: <strong>Read-only</strong> on the journal repo. Used only to read your notes.</span>
           </label>
-
-          <label class="field">
-            <span class="field-label">Data token &mdash; read / write</span>
-            <div class="input-reveal">
-              <input type="password" id="set-data-token" placeholder="github_pat_… (Contents: Read and write)" autocomplete="off" spellcheck="false" />
-              <button type="button" class="reveal-btn" data-reveal="set-data-token" title="Show / hide">&#128065;</button>
-            </div>
-            <span class="field-hint">Contents: <strong>Read and write</strong> on the data repo only. Stores your reports.</span>
-          </label>
         </section>
 
         <section class="settings-section">
@@ -244,7 +218,7 @@
           <p class="settings-help muted">
             Choose which provider writes the report. Each provider keeps its own
             API key, so switching never loses the others. Keys live only in this
-            browser and are <strong>never</strong> synced to the data repo.
+            browser and are <strong>never</strong> synced to Supabase.
           </p>
 
           <label class="field">
@@ -349,28 +323,6 @@
         </section>
 
         <section class="settings-section">
-          <h3 class="settings-heading">Data store <span class="muted tiny">(advanced &middot; read / write)</span></h3>
-          <p class="settings-help muted">
-            A <strong>private</strong> repo holding one JSON file. Unlike a Gist,
-            GitHub enforces access here: without the data token a request gets
-            <code>404</code> &mdash; it will not even confirm the repo exists.
-          </p>
-          <label class="field">
-            <span class="field-label">Data repository (owner/repo)</span>
-            <input type="text" id="set-data-repo" placeholder="kalistamp/daily-data" autocomplete="off" spellcheck="false" />
-          </label>
-          <label class="field">
-            <span class="field-label">Data file path</span>
-            <input type="text" id="set-data-path" placeholder="monthly-reports.json" autocomplete="off" spellcheck="false" />
-            <span class="field-hint">Created automatically on first sync if it doesn't exist.</span>
-          </label>
-          <label class="field">
-            <span class="field-label">Branch</span>
-            <input type="text" id="set-data-branch" placeholder="main" autocomplete="off" spellcheck="false" />
-          </label>
-        </section>
-
-        <section class="settings-section">
           <h3 class="settings-heading">Device lock <span class="muted tiny">(optional)</span></h3>
           <p class="settings-help muted">
             A light passphrase gate for this browser. It is <strong>not</strong>
@@ -419,7 +371,7 @@
       <div class="modal-body" id="ledger-body"></div>
 
       <div class="modal-foot">
-        <span class="muted ledger-foot-note">Stored in the private data repo. The journal is never written to.</span>
+        <span class="muted ledger-foot-note">Stored in Supabase. The journal is never written to.</span>
         <button class="btn btn-primary" data-close-ledger>Done</button>
       </div>
     </div>
@@ -443,6 +395,7 @@
   <!-- Version query busts the browser cache. Sync correctness now depends on
        every device running the SAME script: a device still serving a cached
        pre-merge copy would keep overwriting the store. Bump on sync changes. -->
-  <script src="script.js?v=4"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="script.js?v=5"></script>
 </body>
 </html>

@@ -1,41 +1,80 @@
 /* ============================================================================
-   Monthly Self-Interrogation Agent — application logic (vanilla JS, no deps)
+   Monthly Self-Interrogation Agent — application logic
    ----------------------------------------------------------------------------
    PRIVACY MODEL (confirmed):
      • Pure client-side. No backend server. Runs entirely in the browser.
      • The parent repository holding the private daily-journal markdown stays
-       100% PRIVATE. Only the static files in this `docs/` folder are public.
-     • All persistent data (reports + metadata) lives as JSON in a SEPARATE
-       PRIVATE REPO. GitHub enforces that: an unauthenticated read returns 404,
-       not 403 — it will not even confirm the repo exists. This replaced a
-       secret Gist, which had NO access control at all: a gist ID is a bearer
-       credential, and this one had been published in the public site repo, so
-       anyone could read every report with one unauthenticated request.
-     • TWO tokens, deliberately. The journal token is Contents:READ-ONLY on the
-       journal repo, so no code path here — bug, typo, or otherwise — can write
-       2026daily_pt1.md; GitHub itself rejects it. The data token is
-       Contents:read+write on the data repo ONLY. A fine-grained PAT applies one
-       permission set to every repo it selects, so a single token cannot express
-       "read here, write there". Hence two. Do not merge them.
-     • Secrets (both tokens, per-provider API keys, selected provider + model)
+       100% PRIVATE. Only this static website repository is public.
+     • Persistent reports, claims, prompts, and tombstones live in the isolated
+       `daily` Supabase schema behind Auth and Row Level Security.
+     • The journal token is Contents:READ-ONLY on the journal repo, so no code
+       path here can write the journal; GitHub itself rejects it.
+     • Secrets (the journal token and per-provider API keys)
        are kept EXCLUSIVELY in this browser's localStorage. They are
-       NEVER written into any file in this public `docs/` folder — only sent
+       NEVER written into the public website — only sent
        directly over HTTPS to api.github.com and, for the selected provider,
        one of api.openai.com / api.anthropic.com / generativelanguage.googleapis.com.
    ========================================================================== */
 
 'use strict';
 
+/* Public browser values. Supabase publishable keys are intentionally public;
+   the service-role key must never appear in this repository or browser. */
+const SUPABASE_CONFIG = {
+  url: 'https://baiojghilzxhkebfblzv.supabase.co',
+  publishableKey: 'sb_publishable_nfLVr5Krdld9pxxr4f2CYQ_bsn0TNxx',
+  schema: 'daily',
+};
+let supabaseClient = null;
+let cloudUserId = null;
+let cloudEmail = '';
+
+function cloudClient() {
+  if (supabaseClient) return supabaseClient;
+  if (!window.supabase || !window.supabase.createClient) return null;
+  supabaseClient = window.supabase.createClient(
+    SUPABASE_CONFIG.url, SUPABASE_CONFIG.publishableKey,
+    { db: { schema: SUPABASE_CONFIG.schema }, auth: { persistSession: true, autoRefreshToken: true } }
+  );
+  return supabaseClient;
+}
+
+function installCloudSession(session) {
+  cloudUserId = session?.user?.id || null;
+  cloudEmail = session?.user?.email || '';
+  return session || null;
+}
+
+async function getCloudSession() {
+  const client = cloudClient();
+  if (!client) return null;
+  const { data, error } = await client.auth.getSession();
+  if (error) throw new Error(error.message);
+  return installCloudSession(data?.session);
+}
+
+async function cloudSignIn(email, password) {
+  const client = cloudClient();
+  if (!client) return { ok: false, error: 'Supabase failed to load.' };
+  const { data, error } = await client.auth.signInWithPassword({ email, password });
+  if (error) return { ok: false, error: error.message };
+  installCloudSession(data.session);
+  return { ok: true };
+}
+
+async function cloudSignOut() {
+  const client = cloudClient();
+  cloudUserId = null;
+  cloudEmail = '';
+  if (client) await client.auth.signOut();
+}
+
 /* -------------------------------------------------------------- constants */
 // One localStorage key per provider per field, so switching the active provider
 // never loses the other providers' keys. API keys are DEVICE-LOCAL ONLY and are
-// never written into state.data / the data repo (see dataPushNow).
+// never written into state.data / Supabase (see dataPushNow).
 const LS = {
   githubToken:    'msi.githubToken',   // journal repo, READ-ONLY
-  dataToken:      'msi.dataToken',     // data repo, read + write
-  dataRepo:       'msi.dataRepo',
-  dataPath:       'msi.dataPath',
-  dataBranch:     'msi.dataBranch',
   activeProvider: 'msi.activeProvider',
   openaiKey:      'msi.openaiKey',
   openaiModel:    'msi.openaiModel',
@@ -62,10 +101,6 @@ const LS = {
 // something new, and would silently pin the user forever.
 const DEFAULTS = {
   githubToken:    '',
-  dataToken:      '',
-  dataRepo:       'kalistamp/daily-data',
-  dataPath:       'monthly-reports.json',
-  dataBranch:     'main',
   activeProvider: 'openai',   // default summarization provider (was gemini)
   openaiKey:      '',
   openaiModel:    '',         // blank = Auto
@@ -137,9 +172,9 @@ const state = {
   followupTimer: null,
   pushInFlight: null,
   models: null,
-  dirty: false,   // local edits not yet in the data repo
+  dirty: false,   // local edits not yet in Supabase
   rev: 0,         // bumped on every local edit; guards the dirty-flag clear
-  dataSha: null,  // blob sha of the last data file we read; required to update it
+  dataVersion: 0, // optimistic-concurrency version from Supabase
 };
 
 function emptyData() {
@@ -161,7 +196,7 @@ function normalizeData(d) {
 /* ------------------------------------------------------------ local saves */
 // Every local mutation goes through here. The dirty flag is persisted, not just
 // held in memory: a device that generates a report and is closed before the
-// push lands must still know, on next open, that it owes the Gist a write.
+// push lands must still know, on next open, that it owes Supabase a write.
 function saveLocal() {
   state.rev++;
   state.dirty = true;
@@ -181,7 +216,7 @@ function clearDirty(atRev) {
 The store is one JSON blob written whole. So a plain "upload my local copy" is
    a last-writer-wins overwrite: a phone writes 5 reports, the laptop opens with
    a day-old cache, pushes it, and those 5 reports are gone. That is exactly what
-   happened on the old Gist backend. Every push now merges against a fresh pull
+   happened on the old backend. Every push merges against a fresh pull
    instead of replacing, and the contents API sha makes the write conditional.
 
    Merge is a union keyed by id, so neither device can delete the other's work
@@ -336,12 +371,11 @@ function missingSecrets() {
   const c = cfg();
   const miss = [];
   if (!c.githubToken) miss.push('token');
-  if (!c.dataToken)   miss.push('datatoken');
+  if (!cloudUserId)   miss.push('account');
   if (!providerKey()) miss.push('apikey');   // the ACTIVE provider's key
   return miss;
 }
-// True once both GitHub tokens are present — sync can run.
-const canSync = () => !missingSecrets().some((m) => m === 'token' || m === 'datatoken');
+const canSync = () => Boolean(cloudUserId && cloudClient());
 
 /* ================================================================= GitHub */
 // The token is an explicit argument on purpose. Two tokens are in play with
@@ -356,7 +390,6 @@ function ghHeaders(token, accept = 'application/vnd.github+json') {
   };
 }
 const journalHeaders = (accept) => ghHeaders(cfg().githubToken, accept);
-const dataHeaders    = (accept) => ghHeaders(cfg().dataToken, accept);
 const encPath = (p) => p.split('/').map(encodeURIComponent).join('/');
 
 /* ---------------------------------------------------------------------------
@@ -366,9 +399,8 @@ const encPath = (p) => p.split('/').map(encodeURIComponent).join('/');
    only ever with `githubToken`, which is scoped Contents:Read-only — so even a
    bug that tried to write it would get a 403 from GitHub.
 
-   Writes go exclusively to the DATA repo, with `dataToken`, which has no access
-   to the journal repo at all. The two tokens are never interchanged; that is
-   the whole point of having two.
+   Persistent report writes go only to Supabase. The journal token is used only
+   by githubFetchNotes() and never by a write request.
 --------------------------------------------------------------------------- */
 
 // READ-ONLY: issues only GET requests against the journal. Never writes it.
@@ -400,85 +432,33 @@ async function githubFetchNotes() {
   throw new Error('Could not read notes content from GitHub (unexpected response shape).');
 }
 
-const dataUrl = () => {
-  const { dataRepo, dataPath } = cfg();
-  return `https://api.github.com/repos/${dataRepo}/contents/${encPath(dataPath)}`;
-};
-
-// Reads the data file and remembers its blob sha, which the next write must
-// quote. A 404 means the file has not been created yet — that is the normal
-// first-run state, NOT an error, so it yields empty data and a null sha.
+// Read the signed-in user's JSON document from the isolated `daily` schema.
 async function dataPull() {
-  const { dataRepo, dataBranch } = cfg();
-  const res = await fetch(`${dataUrl()}?ref=${encodeURIComponent(dataBranch)}`, { headers: dataHeaders() });
-  if (res.status === 404) {
-    // Distinguish "no file yet" from "no access": without the repo itself being
-    // visible, GitHub 404s too, and silently treating that as "empty" would let
-    // a bad token look like a fresh install and wipe the store on first push.
-    const probe = await fetch(`https://api.github.com/repos/${dataRepo}`, { headers: dataHeaders() });
-    if (!probe.ok) throw new Error(`Cannot reach ${dataRepo} (${probe.status}). Check the data token's repo access.`);
-    state.dataSha = null;
-    return emptyData();
-  }
-  if (!res.ok) {
-    if (res.status === 401 || res.status === 403) throw new Error(`Data repo auth failed (${res.status}). The data token needs Contents:read+write on ${dataRepo}.`);
-    throw new Error(`Data read failed (${res.status}).`);
-  }
-  const j = await res.json();
-  state.dataSha = j.sha || null;
-  let content = '';
-  if (j.content && j.encoding === 'base64') content = b64DecodeUnicode(j.content);
-  else if (j.sha) {
-    // Files > 1 MB come back without inline content; the blobs API still has it.
-    const b = await fetch(`https://api.github.com/repos/${dataRepo}/git/blobs/${j.sha}`, { headers: dataHeaders() });
-    if (b.ok) {
-      const bj = await b.json();
-      if (bj.content && bj.encoding === 'base64') content = b64DecodeUnicode(bj.content);
-    }
-  }
-  try {
-    return normalizeData(JSON.parse(content));
-  } catch {
-    // File exists but isn't our JSON yet — start fresh (won't clobber until push).
-    return emptyData();
-  }
+  if (!cloudUserId) throw new Error('Sign in to Supabase first.');
+  const { data, error } = await cloudClient().from('monthly_data')
+    .select('data,version').eq('user_id', cloudUserId).maybeSingle();
+  if (error) throw new Error(error.message);
+  state.dataVersion = Number(data?.version || 0);
+  return normalizeData(data?.data || emptyData());
 }
 
-// READ-MERGE-WRITE. Never PUTs the local copy straight over the remote: the
-// contents API replaces the whole file, so a blind write silently deletes
-// anything another device added since this one last pulled. Pull first, merge,
-// then write the union. A failed pull aborts the write — better unsynced than
-// overwritten.
-//
-// The sha gives us real optimistic concurrency, which the Gist never had: if
-// another device wrote between our pull and our PUT, GitHub rejects it with 409
-// instead of quietly taking our version. We re-pull, re-merge and retry, so a
-// genuine race costs a round trip rather than someone's reports.
+// Read, merge, then call a version-checked database function. A concurrent
+// browser causes a retry instead of overwriting newer reports or answers.
 async function dataPushNow(attempt = 0) {
   const atRev = state.rev;
   state.data = mergeData(state.data, await dataPull());
   state.data.updatedAt = new Date().toISOString();
-
-  const body = {
-    message: `reports: ${state.data.reports.length} report(s), ${state.data.claims.length} claim(s)`,
-    content: b64EncodeUnicode(JSON.stringify(state.data, null, 2)),
-    branch: cfg().dataBranch,
-  };
-  if (state.dataSha) body.sha = state.dataSha;   // omitted on create
-
-  const res = await fetch(dataUrl(), { method: 'PUT', headers: dataHeaders(), body: JSON.stringify(body) });
-  if (res.status === 409 || res.status === 422) {
-    if (attempt >= 3) throw new Error('Data repo kept changing under us — try syncing again.');
-    state.dataSha = null;
+  const { data, error } = await cloudClient().rpc('save_data', {
+    expected_version: state.dataVersion,
+    new_data: state.data,
+  });
+  if (error && String(error.message || '').includes('DAILY_VERSION_CONFLICT')) {
+    if (attempt >= 3) throw new Error('Reports kept changing elsewhere — try syncing again.');
+    state.dataVersion = 0;
     return dataPushNow(attempt + 1);
   }
-  if (!res.ok) {
-    const e = await res.json().catch(() => ({}));
-    if (res.status === 403) throw new Error(`Write refused (403). The data token needs Contents:write on ${cfg().dataRepo}.`);
-    throw new Error(e.message || `Data write failed (${res.status}).`);
-  }
-  const j = await res.json().catch(() => ({}));
-  state.dataSha = j.content?.sha || null;
+  if (error) throw new Error(error.message);
+  state.dataVersion = Number(data || state.dataVersion + 1);
   localStorage.setItem(LS.cache, JSON.stringify(state.data));
   clearDirty(atRev);
 }
@@ -1340,8 +1320,7 @@ async function flushPush() {
 
 async function cloudSync() {
   if (!canSync()) {
-    toast('Add both GitHub tokens in Settings first.', 'err');
-    openSettings();
+    toast('Sign in to Supabase first.', 'err');
     return;
   }
   setSync('busy', 'syncing…');
@@ -1349,12 +1328,12 @@ async function cloudSync() {
     await flushPush();                  // push pending local edits (merging)
     setSync('busy', 'syncing…');
     // Then reconcile with the remote. NOT an assignment: `state.data = pull()`
-    // discards anything this device holds that the Gist has not seen yet, which
+    // discards anything this device holds that Supabase has not seen yet, which
     // on a failed/absent push is silent local data loss. Merge keeps both sides.
     const remote = await dataPull();
     state.data = mergeData(state.data, remote);
     localStorage.setItem(LS.cache, JSON.stringify(state.data));
-    // If this device turned out to be holding records the Gist lacks — a push
+    // If this device turned out to be holding records Supabase lacks — a push
     // that failed earlier, a cleared dirty flag — the merge just recovered them
     // locally. Send them up, or they stay stranded on this device forever.
     if (idSet(state.data).size > idSet(remote).size) {
@@ -1368,7 +1347,7 @@ async function cloudSync() {
       renderReport(state.data.reports.find((r) => r.id === state.currentId));
     }
     setSync('synced', 'synced');
-    toast('Synced with private data repo.', 'ok');
+    toast('Synced with Supabase.', 'ok');
   } catch (e) {
     setSync('error', 'sync failed');
     toast(e.message, 'err');
@@ -1448,7 +1427,7 @@ async function generateReport() {
 
     state.data.reports.unshift(report);
     saveLocal();
-    showProgress(true, 'Saving to private data repo…');
+    showProgress(true, 'Saving to Supabase…');
     await flushPushImmediate();
 
     selectReport(report.id);
@@ -1498,7 +1477,7 @@ function selectReport(id) {
 async function deleteCurrentReport() {
   const r = currentReport();
   if (!r) return;
-  const ok = await confirmDialog('Delete report', `Delete the ${r.month} report from your data repo? This can't be undone.`);
+  const ok = await confirmDialog('Delete report', `Delete the ${r.month} report from Supabase? This can't be undone.`);
   if (!ok) return;
   state.data.reports = state.data.reports.filter((x) => x.id !== r.id);
   // Tombstone, not just a local removal: sync is a union now, so a report that
@@ -2428,7 +2407,7 @@ const CUSTOM_MODEL = '__custom__';
 function fillSettings() {
   const c = cfg();
   $('#set-github-token').value = c.githubToken;
-  $('#set-data-token').value = c.dataToken;
+  $('#cloud-account').textContent = cloudEmail || 'not signed in';
   $('#set-provider').value = activeProvider();
   $('#set-openai-key').value = c.openaiKey;
   $('#set-anthropic-key').value = c.anthropicKey;
@@ -2436,9 +2415,6 @@ function fillSettings() {
   $('#set-repo').value = c.repo;
   $('#set-notes-path').value = c.notesPath;
   $('#set-branch').value = c.branch;
-  $('#set-data-repo').value = c.dataRepo;
-  $('#set-data-path').value = c.dataPath;
-  $('#set-data-branch').value = c.dataBranch;
   fillAdvicePrompt();
   syncProviderUI();
 }
@@ -2554,27 +2530,11 @@ async function testConnections() {
     done(tRepo, r.ok, r.ok ? `Notes file: ok (${notesPath})` : `Notes file: failed (${r.status})`);
   } catch (e) { done(tRepo, false, 'Notes file: failed'); }
 
-  const tData = line('Data token');
+  const tData = line('Supabase account');
   try {
-    const r = await fetch('https://api.github.com/user', { headers: dataHeaders() });
-    if (!r.ok) throw new Error(r.status);
-    const u = await r.json();
-    done(tData, true, `Data token: ok (@${u.login})`);
-  } catch (e) { done(tData, false, `Data token: failed (${e.message})`); }
-
-  // Separate line from the token check: the token can be valid while simply not
-  // having this repo selected, which is the likeliest setup mistake.
-  const tDataRepo = line('Data repo');
-  try {
-    const { dataRepo, dataPath, dataBranch } = cfg();
-    const r = await fetch(`https://api.github.com/repos/${dataRepo}`, { headers: dataHeaders() });
-    if (!r.ok) throw new Error(`${dataRepo} not reachable (${r.status})`);
-    const f = await fetch(`https://api.github.com/repos/${dataRepo}/contents/${encPath(dataPath)}?ref=${encodeURIComponent(dataBranch)}`, { headers: dataHeaders() });
-    // 404 here is fine and expected before the first sync creates the file.
-    done(tDataRepo, true, f.ok
-      ? `Data repo: ok (${dataPath} found)`
-      : `Data repo: ok (${dataPath} not created yet — first sync will make it)`);
-  } catch (e) { done(tDataRepo, false, `Data repo: failed (${e.message})`); }
+    await dataPull();
+    done(tData, true, `Supabase account: ok (${cloudEmail})`);
+  } catch (e) { done(tData, false, `Supabase account: failed (${e.message})`); }
 
   // Only the ACTIVE provider is tested — that's the key a report will use.
   const provider = activeProvider();
@@ -2605,20 +2565,32 @@ function hideLock() {
   document.body.style.overflow = '';
 }
 
+function finishCloudLogin() {
+  $('#auth-screen').classList.add('hidden');
+  $('#app').classList.remove('hidden');
+  fillSettings();
+  updateChecklist();
+  if (isLocked()) showLock();
+  else onUnlocked();
+}
+
+async function signOutDaily() {
+  if (state.dirty) await flushPush();
+  await cloudSignOut();
+  [LS.cache, LS.lastId, LS.dirty].forEach((key) => localStorage.removeItem(key));
+  location.reload();
+}
+
 /* ==================================================================== init */
 function bindSettingsInputs() {
   const map = {
     'set-github-token': 'githubToken',
-    'set-data-token': 'dataToken',
     'set-openai-key': 'openaiKey',
     'set-anthropic-key': 'anthropicKey',
     'set-gemini-key': 'geminiKey',
     'set-repo': 'repo',
     'set-notes-path': 'notesPath',
     'set-branch': 'branch',
-    'set-data-repo': 'dataRepo',
-    'set-data-path': 'dataPath',
-    'set-data-branch': 'dataBranch',
   };
   for (const [id, key] of Object.entries(map)) {
     $('#' + id).addEventListener('input', (e) => {
@@ -2684,15 +2656,18 @@ function bindReveal() {
   });
 }
 
-function init() {
+async function init() {
+  // Retire credentials from the former GitHub data-repository backend.
+  ['msi.data' + 'Token', 'msi.data' + 'Repo', 'msi.data' + 'Path',
+   'msi.data' + 'Branch'].forEach((key) => localStorage.removeItem(key));
   loadCfg();
 
   // Theme (respect stored pref, else system).
   const storedTheme = localStorage.getItem(LS.theme);
   applyTheme(storedTheme || (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'));
 
-  // Restore cached Gist data for instant offline view. The cache is a starting
-  // point, never the truth — the sync on open merges it against the Gist.
+  // Restore cached report data for instant offline view. The cache is a starting
+  // point, never the truth — sync on open merges it against Supabase.
   try {
     const cached = localStorage.getItem(LS.cache);
     if (cached) state.data = normalizeData(JSON.parse(cached));
@@ -2716,6 +2691,7 @@ function init() {
   $('#btn-sync').addEventListener('click', cloudSync);
   $('#btn-theme').addEventListener('click', toggleTheme);
   $('#btn-settings').addEventListener('click', openSettings);
+  $('#btn-signout').addEventListener('click', signOutDaily);
   $$('[data-close-settings]').forEach((el) => el.addEventListener('click', closeSettings));
   $$('[data-open-settings]').forEach((el) => el.addEventListener('click', openSettings));
 
@@ -2754,21 +2730,44 @@ function init() {
   // Esc closes whichever modal is open.
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeSettings(); closeLedger(); } });
 
-  // Password gate.
-  if (isLocked()) {
-    showLock();
-    $('#lock-form').addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const hash = await sha256Hex($('#lock-input').value);
-      if (hash === localStorage.getItem(LS.passHash)) {
-        hideLock(); onUnlocked();
-      } else {
-        $('#lock-error').classList.remove('hidden');
-        $('#lock-input').value = '';
-      }
-    });
-  } else {
-    onUnlocked();
+  $('#lock-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const hash = await sha256Hex($('#lock-input').value);
+    if (hash === localStorage.getItem(LS.passHash)) {
+      hideLock(); onUnlocked();
+    } else {
+      $('#lock-error').classList.remove('hidden');
+      $('#lock-input').value = '';
+    }
+  });
+
+  $('#auth-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const button = $('#auth-submit');
+    const message = $('#auth-error');
+    button.disabled = true;
+    button.textContent = 'Signing in…';
+    message.classList.add('hidden');
+    const result = await cloudSignIn(
+      $('#auth-email').value.trim(), $('#auth-password').value
+    );
+    if (result.ok) {
+      $('#auth-password').value = '';
+      finishCloudLogin();
+    } else {
+      message.textContent = result.error;
+      message.classList.remove('hidden');
+      button.disabled = false;
+      button.textContent = 'Sign in';
+    }
+  });
+
+  try {
+    const session = await getCloudSession();
+    if (session) finishCloudLogin();
+  } catch (error) {
+    $('#auth-error').textContent = error.message;
+    $('#auth-error').classList.remove('hidden');
   }
 
   setSync('', 'not synced');
@@ -2776,10 +2775,7 @@ function init() {
 
 // Runs once the app is visible (after unlock, or immediately if no lock).
 function onUnlocked() {
-  // Auto cloud-sync on open if secrets are present.
-  if (canSync()) {
-    cloudSync();
-  }
+  if (canSync()) cloudSync();
 }
 
 document.addEventListener('DOMContentLoaded', init);
