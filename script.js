@@ -64,6 +64,8 @@ async function cloudSignIn(email, password) {
 
 async function cloudSignOut() {
   const client = cloudClient();
+  if (client && state.realtimeChannel) await client.removeChannel(state.realtimeChannel);
+  state.realtimeChannel = null;
   cloudUserId = null;
   cloudEmail = '';
   if (client) await client.auth.signOut();
@@ -171,10 +173,20 @@ const state = {
   reflectionTimer: null,
   followupTimer: null,
   pushInFlight: null,
+  syncInFlight: null,
+  queuedRevision: null,
+  realtimeChannel: null,
   models: null,
   dirty: false,   // local edits not yet in Supabase
   rev: 0,         // bumped on every local edit; guards the dirty-flag clear
-  dataVersion: 0, // optimistic-concurrency version from Supabase
+  remoteRevision: 0,
+  cloudLoaded: false,
+  knownItems: new Map(),
+  pendingChanges: new Map(),
+  cacheItems: new Map(),
+  cacheDbPromise: null,
+  cacheQueue: Promise.resolve(),
+  cacheHydrated: false,
 };
 
 function emptyData() {
@@ -194,30 +206,203 @@ function normalizeData(d) {
 }
 
 /* ------------------------------------------------------------ local saves */
-// Every local mutation goes through here. The dirty flag is persisted, not just
-// held in memory: a device that generates a report and is closed before the
-// push lands must still know, on next open, that it owes Supabase a write.
-function saveLocal() {
+// Cloud and browser caches use the same row-shaped entities. A reflection edit
+// now serializes one report, not the complete history/ledger/prompt document.
+const ENTITY_COLLECTION = {
+  report: 'reports', claim: 'claims', tombstone: 'deleted', prompt: 'prompts',
+};
+const COLLECTION_ENTITY = {
+  reports: 'report', claims: 'claim', deleted: 'tombstone',
+};
+const cloneJson = (value) => JSON.parse(JSON.stringify(value));
+const sameJson = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+const entityKey = (type, id) => `${type}\u0000${String(id)}`;
+function splitEntityKey(key) {
+  const at = key.indexOf('\u0000');
+  return { type: key.slice(0, at), id: key.slice(at + 1) };
+}
+function entityId(type, data) {
+  return type === 'prompt' ? 'settings' : String(data?.id || '');
+}
+function flattenData(data) {
+  const value = normalizeData(data);
+  const items = new Map();
+  for (const [collection, type] of Object.entries(COLLECTION_ENTITY)) {
+    for (const record of value[collection]) {
+      const id = entityId(type, record);
+      if (id) items.set(entityKey(type, id), cloneJson(record));
+    }
+  }
+  items.set(entityKey('prompt', 'settings'), cloneJson(value.prompts));
+  return items;
+}
+function unflattenData(items) {
+  const value = emptyData();
+  for (const [key, data] of items) {
+    const { type } = splitEntityKey(key);
+    if (type === 'prompt') value.prompts = cloneJson(data);
+    else if (ENTITY_COLLECTION[type]) value[ENTITY_COLLECTION[type]].push(cloneJson(data));
+  }
+  value.reports.sort((a, b) => (b.generatedAt || '').localeCompare(a.generatedAt || ''));
+  return normalizeData(value);
+}
+function diffItems(base, desired) {
+  const changes = new Map();
+  for (const [key, data] of desired) {
+    if (!base.has(key) || !sameJson(base.get(key), data)) {
+      const { type, id } = splitEntityKey(key);
+      changes.set(key, { entity_type: type, entity_id: id, action: 'upsert', data: cloneJson(data) });
+    }
+  }
+  for (const key of base.keys()) {
+    if (!desired.has(key)) {
+      const { type, id } = splitEntityKey(key);
+      changes.set(key, { entity_type: type, entity_id: id, action: 'delete' });
+    }
+  }
+  return changes;
+}
+
+function markDirty() {
   state.rev++;
   state.dirty = true;
   localStorage.setItem(LS.dirty, '1');
-  localStorage.setItem(LS.cache, JSON.stringify(state.data));
+}
+function stageAllChanges() {
+  state.pendingChanges = diffItems(state.knownItems, flattenData(state.data));
+  if (!state.pendingChanges.size && !state.pushInFlight) clearDirty();
+}
+function stageItem(type, data) {
+  const id = entityId(type, data);
+  if (!id) return;
+  const key = entityKey(type, id);
+  if (state.knownItems.has(key) && sameJson(state.knownItems.get(key), data)) {
+    state.pendingChanges.delete(key);
+  } else {
+    state.pendingChanges.set(key, {
+      entity_type: type, entity_id: id, action: 'upsert', data: cloneJson(data),
+    });
+  }
+}
+function saveLocal() {
+  markDirty();
+  cacheData(state.data);
+  stageAllChanges();
+}
+function saveLocalItem(type, data) {
+  markDirty();
+  cacheItem(type, data);
+  stageItem(type, data);
 }
 function clearDirty(atRev) {
-  if (atRev !== undefined && atRev !== state.rev) return;  // edited mid-push
+  if (atRev !== undefined && atRev !== state.rev) return;
+  if (state.pendingChanges.size || state.pushInFlight) return;
   state.dirty = false;
   localStorage.removeItem(LS.dirty);
+}
+
+function openCache() {
+  if (state.cacheDbPromise) return state.cacheDbPromise;
+  if (!window.indexedDB || !cloudUserId) return Promise.resolve(null);
+  state.cacheDbPromise = new Promise((resolve, reject) => {
+    const request = window.indexedDB.open(`daily-cache-v2-${cloudUserId}`, 1);
+    request.onupgradeneeded = () => {
+      if (!request.result.objectStoreNames.contains('items')) {
+        request.result.createObjectStore('items', { keyPath: 'key' });
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+  return state.cacheDbPromise;
+}
+function cacheTransaction(mode, run) {
+  return openCache().then((db) => {
+    if (!db) return null;
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction('items', mode);
+      run(tx.objectStore('items'));
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
+    });
+  });
+}
+function enqueueCache(run) {
+  state.cacheQueue = state.cacheQueue.then(run).catch(() => null);
+  return state.cacheQueue;
+}
+function cacheItem(type, data) {
+  const id = entityId(type, data);
+  if (!id) return Promise.resolve();
+  const key = entityKey(type, id);
+  const value = cloneJson(data);
+  state.cacheItems.set(key, value);
+  return enqueueCache(() => cacheTransaction('readwrite', (store) => {
+    store.put({ key, data: value });
+  }));
+}
+function cacheData(data) {
+  const desired = flattenData(data);
+  const changes = diffItems(state.cacheItems, desired);
+  state.cacheItems = desired;
+  if (!changes.size) return Promise.resolve();
+  return enqueueCache(() => cacheTransaction('readwrite', (store) => {
+    for (const [key, change] of changes) {
+      if (change.action === 'delete') store.delete(key);
+      else store.put({ key, data: change.data });
+    }
+  }));
+}
+async function readCache() {
+  await state.cacheQueue;
+  let db = null;
+  try { db = await openCache(); }
+  catch (error) {
+    state.cacheDbPromise = null;
+    console.warn('IndexedDB cache unavailable:', error?.message || error);
+  }
+  let records = [];
+  if (db) {
+    records = await new Promise((resolve, reject) => {
+      const request = db.transaction('items').objectStore('items').getAll();
+      request.onsuccess = () => resolve(request.result || []);
+      request.onerror = () => reject(request.error);
+    });
+  }
+  if (!records.length) {
+    try {
+      const legacy = localStorage.getItem(LS.cache);
+      if (legacy) {
+        const data = normalizeData(JSON.parse(legacy));
+        if (db) {
+          const desired = flattenData(data);
+          await cacheTransaction('readwrite', (store) => {
+            for (const [key, value] of desired) store.put({ key, data: value });
+          });
+          state.cacheItems = desired;
+          localStorage.removeItem(LS.cache);
+        }
+        return data;
+      }
+    } catch { /* ignore corrupt legacy cache */ }
+  }
+  state.cacheItems = new Map(records.map((record) => [record.key, record.data]));
+  return unflattenData(state.cacheItems);
+}
+async function clearCache() {
+  state.cacheItems = new Map();
+  await enqueueCache(() => cacheTransaction('readwrite', (store) => store.clear()));
 }
 
 /* ------------------------------------------------------------------ merge */
 /* ---------------------------------------------------------------------------
    WHY THIS EXISTS
    ---------------------------------------------------------------------------
-The store is one JSON blob written whole. So a plain "upload my local copy" is
-   a last-writer-wins overwrite: a phone writes 5 reports, the laptop opens with
-   a day-old cache, pushes it, and those 5 reports are gone. That is exactly what
-   happened on the old backend. Every push merges against a fresh pull
-   instead of replacing, and the contents API sha makes the write conditional.
+The legacy store was one JSON blob written whole, so a plain "upload my local
+   copy" was a last-writer-wins overwrite. V2 writes rows conditionally, but a
+   device can still reconnect with stale cached rows. This merge preserves both
+   devices' work before the client computes the row-level changes to send.
 
    Merge is a union keyed by id, so neither device can delete the other's work
    by simply not knowing about it. Deletion therefore has to be explicit — an id
@@ -391,6 +576,7 @@ function ghHeaders(token, accept = 'application/vnd.github+json') {
 }
 const journalHeaders = (accept) => ghHeaders(cfg().githubToken, accept);
 const encPath = (p) => p.split('/').map(encodeURIComponent).join('/');
+let journalCache = { url: '', etag: '', text: '' };
 
 /* ---------------------------------------------------------------------------
    THE JOURNAL REPO IS READ-ONLY  ·  enforced by GitHub, not by this file
@@ -412,55 +598,140 @@ async function githubFetchNotes() {
   // yielded the JSON envelope instead of file text and made every month look
   // empty. The JSON endpoint is the CORS-safe, browser-supported path.
   const url = `https://api.github.com/repos/${repo}/contents/${encPath(notesPath)}?ref=${encodeURIComponent(branch)}`;
-  const res = await fetch(url, { headers: journalHeaders() });
+  const headers = journalHeaders();
+  if (journalCache.url === url && journalCache.etag && journalCache.text) {
+    headers['If-None-Match'] = journalCache.etag;
+  }
+  const res = await fetch(url, { headers });
+  if (res.status === 304 && journalCache.url === url && journalCache.text) {
+    return journalCache.text;
+  }
   if (!res.ok) {
     if (res.status === 404) throw new Error(`Notes file not found: ${repo}/${notesPath}@${branch}. Check the path in Settings.`);
     if (res.status === 401 || res.status === 403) throw new Error(`GitHub auth failed (${res.status}). Token needs Contents:read on ${repo}.`);
     throw new Error(`GitHub notes fetch failed (${res.status}).`);
   }
   const j = await res.json();
-  if (j && j.content && j.encoding === 'base64') return b64DecodeUnicode(j.content);
+  if (j && j.content && j.encoding === 'base64') {
+    const text = b64DecodeUnicode(j.content);
+    journalCache = { url, etag: res.headers.get('etag') || '', text };
+    return text;
+  }
   // Files > 1 MB: the contents API omits content. Fall back to the Git Blobs
   // API (also JSON + base64, so still CORS-safe).
   if (j && j.sha) {
     const b = await fetch(`https://api.github.com/repos/${repo}/git/blobs/${j.sha}`, { headers: journalHeaders() });
     if (b.ok) {
       const bj = await b.json();
-      if (bj && bj.content && bj.encoding === 'base64') return b64DecodeUnicode(bj.content);
+      if (bj && bj.content && bj.encoding === 'base64') {
+        const text = b64DecodeUnicode(bj.content);
+        journalCache = { url, etag: res.headers.get('etag') || '', text };
+        return text;
+      }
     }
   }
   throw new Error('Could not read notes content from GitHub (unexpected response shape).');
 }
 
-// Read the signed-in user's JSON document from the isolated `daily` schema.
-async function dataPull() {
+// Read only the tiny revision row first. Normal operation then requests just
+// entities changed since this device's revision; a full paginated read is used
+// only for first load or conflict recovery.
+async function readCloudRevision() {
   if (!cloudUserId) throw new Error('Sign in to Supabase first.');
-  const { data, error } = await cloudClient().from('monthly_data')
-    .select('data,version').eq('user_id', cloudUserId).maybeSingle();
+  const { data, error } = await cloudClient().from('daily_sync_state')
+    .select('revision').eq('user_id', cloudUserId).maybeSingle();
   if (error) throw new Error(error.message);
-  state.dataVersion = Number(data?.version || 0);
-  return normalizeData(data?.data || emptyData());
+  if (!data) {
+    const created = await cloudClient().rpc('ensure_daily_state');
+    if (created.error) throw new Error(created.error.message);
+    return Number(created.data || 0);
+  }
+  return Number(data.revision || 0);
+}
+async function readAllCloudItems(revision) {
+  const rows = [];
+  const pageSize = 500;
+  for (let from = 0; ; from += pageSize) {
+    const { data, error } = await cloudClient().from('daily_items')
+      .select('entity_type,entity_id,data,revision')
+      .eq('user_id', cloudUserId).range(from, from + pageSize - 1);
+    if (error) throw new Error(error.message);
+    rows.push(...(data || []));
+    if (!data || data.length < pageSize) break;
+  }
+  state.knownItems = new Map(rows.map((row) => [
+    entityKey(row.entity_type, row.entity_id), cloneJson(row.data),
+  ]));
+  state.remoteRevision = Number(revision == null ? await readCloudRevision() : revision);
+  state.cloudLoaded = true;
+  return unflattenData(state.knownItems);
+}
+async function readCloudDelta(targetRevision) {
+  const { data, error } = await cloudClient().rpc('read_daily_changes_since', {
+    since_revision: state.remoteRevision,
+  });
+  if (error) throw new Error(error.message);
+  const payload = data || {};
+  for (const change of payload.changes || []) {
+    const key = entityKey(change.entity_type, change.entity_id);
+    if (change.deleted) state.knownItems.delete(key);
+    else state.knownItems.set(key, cloneJson(change.data));
+  }
+  state.remoteRevision = Number(payload.revision == null ? targetRevision : payload.revision);
+  return unflattenData(state.knownItems);
+}
+async function dataPull(announcedRevision) {
+  const revision = announcedRevision == null
+    ? await readCloudRevision() : Number(announcedRevision);
+  if (state.cloudLoaded && revision === state.remoteRevision) return null;
+  if (state.cloudLoaded && revision > state.remoteRevision) return readCloudDelta(revision);
+  return readAllCloudItems(revision);
+}
+function applyKnownChanges(changes) {
+  for (const change of changes) {
+    const key = entityKey(change.entity_type, change.entity_id);
+    if (change.action === 'delete') state.knownItems.delete(key);
+    else state.knownItems.set(key, cloneJson(change.data));
+  }
 }
 
-// Read, merge, then call a version-checked database function. A concurrent
-// browser causes a retry instead of overwriting newer reports or answers.
-async function dataPushNow(attempt = 0) {
-  const atRev = state.rev;
-  state.data = mergeData(state.data, await dataPull());
-  state.data.updatedAt = new Date().toISOString();
-  const { data, error } = await cloudClient().rpc('save_data', {
-    expected_version: state.dataVersion,
-    new_data: state.data,
-  });
-  if (error && String(error.message || '').includes('DAILY_VERSION_CONFLICT')) {
-    if (attempt >= 3) throw new Error('Reports kept changing elsewhere — try syncing again.');
-    state.dataVersion = 0;
-    return dataPushNow(attempt + 1);
+// A write carries only changed rows. Revision conflicts fetch once, merge at
+// entity level, and retry rather than reading/re-writing the full document on
+// every reflection keystroke.
+async function dataPushNow() {
+  if (!cloudUserId) throw new Error('Sign in to Supabase first.');
+  if (!state.cloudLoaded) {
+    const local = state.data;
+    state.data = mergeData(local, await readAllCloudItems());
+    await cacheData(state.data);
+    stageAllChanges();
   }
-  if (error) throw new Error(error.message);
-  state.dataVersion = Number(data || state.dataVersion + 1);
-  localStorage.setItem(LS.cache, JSON.stringify(state.data));
-  clearDirty(atRev);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const changes = [...state.pendingChanges.values()].slice(0, 200);
+    if (!changes.length) { clearDirty(); return; }
+    const atRev = state.rev;
+    const { data, error } = await cloudClient().rpc('apply_daily_changes', {
+      expected_revision: state.remoteRevision,
+      changes,
+    });
+    if (!error) {
+      state.remoteRevision = Number(data == null ? state.remoteRevision + 1 : data);
+      applyKnownChanges(changes);
+      stageAllChanges();
+      clearDirty(atRev);
+      if (state.pendingChanges.size) return dataPushNow();
+      return;
+    }
+    if (!String(error.message || '').includes('DAILY_REVISION_CONFLICT')) {
+      throw new Error(error.message);
+    }
+    const local = state.data;
+    const remote = await readAllCloudItems();
+    state.data = mergeData(local, remote);
+    await cacheData(state.data);
+    stageAllChanges();
+  }
+  throw new Error('Reports kept changing elsewhere — try syncing again.');
 }
 
 /* ============================================================== providers */
@@ -687,13 +958,13 @@ const PROVIDERS = {
       return { text, finishReason: cand?.finishReason || json?.promptFeedback?.blockReason };
     },
 
-    // Single attempt against one model.
+    // Single attempt against one model. Keep the key out of the URL so it is
+    // not copied into URL logs, browser history, or intermediary diagnostics.
     async once(model, systemText, userText, key) {
-      // Gemini authenticates with the key as a query param.
-      const url = `${this.base}/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`;
+      const url = `${this.base}/models/${encodeURIComponent(model)}:generateContent`;
       const res = await fetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
         body: JSON.stringify(this.buildBody(model, systemText, userText)),
       });
       const data = await res.json().catch(() => ({}));
@@ -745,7 +1016,7 @@ const PROVIDERS = {
     },
 
     async discover(key) {
-      const res = await fetch(`${this.base}/models?key=${encodeURIComponent(key)}`);
+      const res = await fetch(`${this.base}/models`, { headers: { 'x-goog-api-key': key } });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw apiError(`Gemini model list failed (${res.status}).`, res.status, data?.error?.message);
       return (data.models || [])
@@ -880,7 +1151,7 @@ function findOpenLoops(entries) {
    USER-OWNED PROMPT
    ---------------------------------------------------------------------------
    This block is edited by the user in Settings and injected verbatim into the
-   report system prompt. It lives in the synced data file, not localStorage, so
+   report system prompt. It lives in the synced prompt row, not localStorage, so
    the phone and the laptop cannot drift into generating differently-shaped
    advice from the same journal.
 
@@ -930,7 +1201,7 @@ function setAdvicePrompt(text) {
   // copy of today's default text frozen into the file forever.
   state.data.prompts.advice = t === DEFAULT_ADVICE_PROMPT.trim() ? '' : t;
   state.data.prompts.adviceUpdatedAt = new Date().toISOString();
-  saveLocal();
+  saveLocalItem('prompt', state.data.prompts);
   schedulePush();
 }
 
@@ -1186,7 +1457,7 @@ function b64EncodeUnicode(str) {
 
 /* ======================================================= markdown → HTML */
 function escapeHtml(s) {
-  return s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  return String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 }
 function mdInline(t) {
   t = escapeHtml(t);
@@ -1307,51 +1578,86 @@ function schedulePush() {
 }
 async function flushPush() {
   clearTimeout(state.pushTimer);
-  if (!state.dirty) { setSync('synced', 'synced'); return; }
+  if (!state.dirty) { setSync('synced', 'synced'); return true; }
   if (state.pushInFlight) return state.pushInFlight;
   setSync('busy', 'syncing…');
   state.pushInFlight = (async () => {
-    try { await dataPushNow(); setSync('synced', 'synced'); }
-    catch (e) { setSync('error', 'sync failed'); toast(e.message, 'err'); }
-    finally { state.pushInFlight = null; }
+    try { await dataPushNow(); setSync('synced', 'synced'); return true; }
+    catch (e) { setSync('error', 'sync failed'); toast(e.message, 'err'); return false; }
+    finally {
+      state.pushInFlight = null;
+      if (!state.pendingChanges.size) clearDirty();
+    }
   })();
   return state.pushInFlight;
 }
 
-async function cloudSync() {
+async function cloudSync(announcedRevision, announce = true) {
   if (!canSync()) {
-    toast('Sign in to Supabase first.', 'err');
+    if (announce) toast('Sign in to Supabase first.', 'err');
     return;
   }
-  setSync('busy', 'syncing…');
-  try {
-    await flushPush();                  // push pending local edits (merging)
-    setSync('busy', 'syncing…');
-    // Then reconcile with the remote. NOT an assignment: `state.data = pull()`
-    // discards anything this device holds that Supabase has not seen yet, which
-    // on a failed/absent push is silent local data loss. Merge keeps both sides.
-    const remote = await dataPull();
-    state.data = mergeData(state.data, remote);
-    localStorage.setItem(LS.cache, JSON.stringify(state.data));
-    // If this device turned out to be holding records Supabase lacks — a push
-    // that failed earlier, a cleared dirty flag — the merge just recovered them
-    // locally. Send them up, or they stay stranded on this device forever.
-    if (idSet(state.data).size > idSet(remote).size) {
-      saveLocal();
-      await flushPush();
+  if (state.syncInFlight) {
+    const revision = Number(announcedRevision);
+    if (Number.isFinite(revision)) {
+      state.queuedRevision = Math.max(state.queuedRevision || 0, revision);
     }
-    renderHistory();
-    if (state.currentId && !state.data.reports.find((r) => r.id === state.currentId)) {
-      state.currentId = null; showEmpty();
-    } else if (state.currentId) {
-      renderReport(state.data.reports.find((r) => r.id === state.currentId));
-    }
-    setSync('synced', 'synced');
-    toast('Synced with Supabase.', 'ok');
-  } catch (e) {
-    setSync('error', 'sync failed');
-    toast(e.message, 'err');
+    return state.syncInFlight;
   }
+  setSync('busy', 'syncing…');
+  state.syncInFlight = (async () => {
+    try {
+      const remote = await dataPull(announcedRevision);
+      if (remote) {
+        state.data = mergeData(state.data, remote);
+        await cacheData(state.data);
+        stageAllChanges();
+        renderHistory();
+        if (state.currentId && !state.data.reports.find((r) => r.id === state.currentId)) {
+          state.currentId = null;
+          showEmpty();
+        } else if (state.currentId) {
+          renderReport(state.data.reports.find((r) => r.id === state.currentId));
+        }
+      }
+      if (state.pendingChanges.size && !(await flushPush())) return;
+      setSync('synced', 'synced');
+      if (announce) toast('Synced with Supabase.', 'ok');
+    } catch (e) {
+      setSync('error', 'sync failed');
+      if (announce) toast(e.message, 'err');
+      else console.warn('Realtime sync failed:', e.message);
+    }
+  })();
+  try {
+    await state.syncInFlight;
+  } finally {
+    state.syncInFlight = null;
+    const queued = state.queuedRevision;
+    state.queuedRevision = null;
+    if (queued && queued > state.remoteRevision) {
+      cloudSync(queued, false);
+    }
+  }
+}
+
+function subscribeCloud() {
+  const client = cloudClient();
+  if (!client || !cloudUserId || state.realtimeChannel) return;
+  state.realtimeChannel = client.channel(`daily-sync-${cloudUserId}`).on(
+    'postgres_changes',
+    {
+      event: 'UPDATE', schema: SUPABASE_CONFIG.schema, table: 'daily_sync_state',
+      filter: `user_id=eq.${cloudUserId}`,
+    },
+    (payload) => {
+      const revision = Number(payload?.new?.revision || 0);
+      if (revision > state.remoteRevision) cloudSync(revision, false);
+    }
+  ).subscribe((status) => {
+    // Close the small gap between the first read and subscription readiness.
+    if (status === 'SUBSCRIBED') cloudSync(undefined, false);
+  });
 }
 
 /* ============================================================ report flow */
@@ -1426,7 +1732,7 @@ async function generateReport() {
     };
 
     state.data.reports.unshift(report);
-    saveLocal();
+    saveLocalItem('report', report);
     showProgress(true, 'Saving to Supabase…');
     await flushPushImmediate();
 
@@ -1460,9 +1766,8 @@ const byDateOf = (entries) => {
 
 // Immediate (awaited) push used right after generation.
 async function flushPushImmediate() {
-  setSync('busy', 'syncing…');
-  try { await dataPushNow(); setSync('synced', 'synced'); }
-  catch (e) { setSync('error', 'sync failed'); toast('Saved locally, sync failed: ' + e.message, 'err'); }
+  clearTimeout(state.pushTimer);
+  await flushPush();
 }
 
 /* ================================================================ actions */
@@ -1530,7 +1835,7 @@ function onReflectionInput() {
   if (!r) return;
   r.reflection = $('#reflection-input').value;
   r.reflectionUpdatedAt = new Date().toISOString();
-  saveLocal();
+  saveLocalItem('report', r);
   $('#reflection-status').textContent = 'saving…';
   clearTimeout(state.reflectionTimer);
   state.reflectionTimer = setTimeout(async () => {
@@ -1555,20 +1860,30 @@ function renderHistory() {
     li.className = 'history-item' + (r.id === state.currentId ? ' active' : '');
     const modelLabel = r.provider ? `${providerLabel(r.provider)} · ${r.model}` : r.model;
     const range = (r.rangeStart && r.rangeEnd) ? fmtDayRange(r.rangeStart, r.rangeEnd) : '';
-    li.innerHTML =
-      `<span class="hi-month">${r.month}</span>` +
-      `<span class="hi-sub">` +
-      (range ? `<span>${range}</span>` : '') +
-      `<span>${modelLabel}</span><span>${fmtDate(r.generatedAt)}</span>` +
-      // Follow-ups are the main way answers get in now, so the list has to show
-      // which reports still have questions waiting.
-      (() => {
-        const fu = r.followups || [];
-        if (!fu.length) return '';
-        const done = fu.filter((f) => f.a && f.a.trim()).length;
-        return `<span>· ${done}/${fu.length} answered</span>`;
-      })() +
-      (r.reflection ? '<span>· reflected</span>' : '') + `</span>`;
+    const month = document.createElement('span');
+    month.className = 'hi-month';
+    month.textContent = r.month || '';
+    const sub = document.createElement('span');
+    sub.className = 'hi-sub';
+    [range, modelLabel, fmtDate(r.generatedAt)].filter(Boolean).forEach((text) => {
+      const span = document.createElement('span');
+      span.textContent = text;
+      sub.appendChild(span);
+    });
+    // Follow-ups are the main way answers get in now, so the list has to show
+    // which reports still have questions waiting.
+    const fu = r.followups || [];
+    if (fu.length) {
+      const answered = document.createElement('span');
+      answered.textContent = `· ${fu.filter((f) => f.a && f.a.trim()).length}/${fu.length} answered`;
+      sub.appendChild(answered);
+    }
+    if (r.reflection) {
+      const reflected = document.createElement('span');
+      reflected.textContent = '· reflected';
+      sub.appendChild(reflected);
+    }
+    li.append(month, sub);
     li.addEventListener('click', () => selectReport(r.id));
     list.appendChild(li);
   }
@@ -1654,7 +1969,7 @@ function renderFollowups(r) {
           ${f.why ? `<span class="fu-why muted">${escapeHtml(f.why)}</span>` : ''}
         </div>
       </div>
-      <textarea class="fu-input" data-fu="${f.id}" rows="2"
+      <textarea class="fu-input" data-fu="${escapeHtml(f.id)}" rows="2"
         placeholder="short answer — a sentence or two is plenty">${escapeHtml(f.a || '')}</textarea>
     </li>`).join('');
 }
@@ -1672,7 +1987,7 @@ function onFollowupInput(e) {
   const fu = r.followups || [];
   $('#followup-status').textContent =
     `${fu.filter((x) => x.a && x.a.trim()).length} of ${fu.length} answered · saving…`;
-  saveLocal();
+  saveLocalItem('report', r);
   clearTimeout(state.followupTimer);
   state.followupTimer = setTimeout(async () => {
     await flushPush();
@@ -1713,7 +2028,7 @@ async function askMoreFollowups() {
       return;
     }
     r.followups = [...(r.followups || []), ...fresh];
-    saveLocal();
+    saveLocalItem('report', r);
     renderFollowups(r);
     await flushPushImmediate();
     toast(`${fresh.length} new follow-up question${fresh.length === 1 ? '' : 's'}.`, 'ok');
@@ -1820,7 +2135,7 @@ async function regenerateWithAnswers() {
     // outrank this rewrite and quietly restore the old text.
     r.generatedAt = r.regeneratedAt;
 
-    saveLocal();
+    saveLocalItem('report', r);
     renderReport(r);
     renderHistory();
     await flushPushImmediate();
@@ -2239,37 +2554,45 @@ function setVerdict(id, verdict) {
 const pct = (v) => (v === null ? '—' : Math.round(v * 100) + '%');
 
 function claimRow(c) {
+  // Treat cloud data as untrusted input even though RLS limits it to this user.
+  // These values feed class names and data attributes, so normalize them before
+  // building the delegated-action markup.
+  const type = ['forecast', 'commitment'].includes(c.type) ? c.type : 'forecast';
+  const status = ['open', 'proposed', 'void', ...CLAIM_VERDICTS].includes(c.status)
+    ? c.status : 'open';
+  const proposed = CLAIM_VERDICTS.includes(c.proposedVerdict) ? c.proposedVerdict : 'partial';
+  const id = escapeHtml(c.id);
   const conf = Math.round(c.confidence * 100) + '%';
-  const due = c.dueDate ? ` · due ${fmtDay(c.dueDate)}` : '';
-  const overdue = c.status === 'open' && c.dueDate && c.dueDate < todayStr();
+  const due = c.dueDate ? ` · due ${escapeHtml(fmtDay(c.dueDate))}` : '';
+  const overdue = status === 'open' && c.dueDate && c.dueDate < todayStr();
   const ev = c.evidence
-    ? `<div class="claim-ev"><span class="ev-date">${fmtDay(c.evidenceDate)}</span>${escapeHtml(c.evidence)}</div>`
+    ? `<div class="claim-ev"><span class="ev-date">${escapeHtml(fmtDay(c.evidenceDate))}</span>${escapeHtml(c.evidence)}</div>`
     : '';
-  const actions = c.status === 'proposed'
+  const actions = status === 'proposed'
     ? `<div class="claim-actions">
-         <span class="muted">model says <strong>${c.proposedVerdict}</strong> —</span>
-         <button class="btn btn-mini ok" data-claim="${c.id}" data-verdict="${c.proposedVerdict}">accept</button>
-         <button class="btn btn-mini" data-claim="${c.id}" data-verdict="${c.proposedVerdict === 'right' ? 'wrong' : 'right'}">no, ${c.proposedVerdict === 'right' ? 'wrong' : 'right'}</button>
-         <button class="btn btn-mini" data-claim="${c.id}" data-verdict="partial">partial</button>
-         <button class="btn btn-mini" data-claim="${c.id}" data-verdict="open">reject</button>
+         <span class="muted">model says <strong>${proposed}</strong> —</span>
+         <button class="btn btn-mini ok" data-claim="${id}" data-verdict="${proposed}">accept</button>
+         <button class="btn btn-mini" data-claim="${id}" data-verdict="${proposed === 'right' ? 'wrong' : 'right'}">no, ${proposed === 'right' ? 'wrong' : 'right'}</button>
+         <button class="btn btn-mini" data-claim="${id}" data-verdict="partial">partial</button>
+         <button class="btn btn-mini" data-claim="${id}" data-verdict="open">reject</button>
        </div>`
-    : c.status === 'open'
+    : status === 'open'
       ? `<div class="claim-actions">
-           <button class="btn btn-mini ok" data-claim="${c.id}" data-verdict="right">right</button>
-           <button class="btn btn-mini" data-claim="${c.id}" data-verdict="wrong">wrong</button>
-           <button class="btn btn-mini" data-claim="${c.id}" data-verdict="partial">partial</button>
-           <button class="btn btn-mini" data-claim="${c.id}" data-verdict="void">not a claim</button>
+           <button class="btn btn-mini ok" data-claim="${id}" data-verdict="right">right</button>
+           <button class="btn btn-mini" data-claim="${id}" data-verdict="wrong">wrong</button>
+           <button class="btn btn-mini" data-claim="${id}" data-verdict="partial">partial</button>
+           <button class="btn btn-mini" data-claim="${id}" data-verdict="void">not a claim</button>
          </div>`
       : `<div class="claim-actions">
-           <span class="verdict v-${c.status}">${c.status}</span>
-           <button class="btn btn-mini" data-claim="${c.id}" data-verdict="open">reopen</button>
+           <span class="verdict v-${status}">${status}</span>
+           <button class="btn btn-mini" data-claim="${id}" data-verdict="open">reopen</button>
          </div>`;
-  return `<li class="claim s-${c.status}${overdue ? ' overdue' : ''}">
+  return `<li class="claim s-${status}${overdue ? ' overdue' : ''}">
     <div class="claim-top">
-      <span class="claim-type t-${c.type}">${c.type}</span>
+      <span class="claim-type t-${type}">${type}</span>
       <span class="claim-conf" title="how sure they sounded">${conf}</span>
       ${c.domain ? `<span class="claim-domain">${escapeHtml(c.domain)}</span>` : ''}
-      <span class="claim-when">${fmtDay(c.sourceDate)}${due}${overdue ? ' · overdue' : ''}</span>
+      <span class="claim-when">${escapeHtml(fmtDay(c.sourceDate))}${due}${overdue ? ' · overdue' : ''}</span>
     </div>
     <p class="claim-text">${escapeHtml(c.text)}</p>
     <blockquote class="claim-quote">${escapeHtml(c.quote)}</blockquote>
@@ -2345,7 +2668,7 @@ function toast(msg, kind = '') {
   const ico = kind === 'ok' ? '✓' : kind === 'err' ? '✕' : 'ℹ';
   el.innerHTML = `<span class="toast-ico">${ico}</span><span>${escapeHtml(msg)}</span>`;
   wrap.appendChild(el);
-  setTimeout(() => { el.style.opacity = '0'; el.style.transition = 'opacity .3s'; setTimeout(() => el.remove(), 300); }, kind === 'err' ? 6000 : 3800);
+  setTimeout(() => { el.classList.add('is-leaving'); setTimeout(() => el.remove(), 300); }, kind === 'err' ? 6000 : 3800);
 }
 
 /* =========================================================== confirm modal */
@@ -2556,16 +2879,24 @@ function isLocked() { return !!localStorage.getItem(LS.passHash); }
 function showLock() {
   $('#lock-screen').classList.remove('hidden');
   $('#app').setAttribute('aria-hidden', 'true');
-  document.body.style.overflow = 'hidden';
+  document.body.classList.add('lock-open');
   setTimeout(() => $('#lock-input').focus(), 50);
 }
 function hideLock() {
   $('#lock-screen').classList.add('hidden');
   $('#app').removeAttribute('aria-hidden');
-  document.body.style.overflow = '';
+  document.body.classList.remove('lock-open');
 }
 
-function finishCloudLogin() {
+async function finishCloudLogin() {
+  if (!state.cacheHydrated) {
+    state.data = normalizeData(await readCache());
+    state.dirty = localStorage.getItem(LS.dirty) === '1';
+    state.cacheHydrated = true;
+    renderHistory();
+    const lastId = localStorage.getItem(LS.lastId);
+    if (lastId && state.data.reports.find((r) => r.id === lastId)) selectReport(lastId);
+  }
   $('#auth-screen').classList.add('hidden');
   $('#app').classList.remove('hidden');
   fillSettings();
@@ -2576,6 +2907,7 @@ function finishCloudLogin() {
 
 async function signOutDaily() {
   if (state.dirty) await flushPush();
+  await clearCache();
   await cloudSignOut();
   [LS.cache, LS.lastId, LS.dirty].forEach((key) => localStorage.removeItem(key));
   location.reload();
@@ -2666,14 +2998,6 @@ async function init() {
   const storedTheme = localStorage.getItem(LS.theme);
   applyTheme(storedTheme || (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'));
 
-  // Restore cached report data for instant offline view. The cache is a starting
-  // point, never the truth — sync on open merges it against Supabase.
-  try {
-    const cached = localStorage.getItem(LS.cache);
-    if (cached) state.data = normalizeData(JSON.parse(cached));
-  } catch { /* ignore */ }
-  state.dirty = localStorage.getItem(LS.dirty) === '1';
-
   // Defaults for controls.
   $('#target-month').value = prevMonthStr();
   syncRangeToMonth();
@@ -2683,12 +3007,8 @@ async function init() {
   updateChecklist();
   renderHistory();
 
-  // Restore last-viewed report if present.
-  const lastId = localStorage.getItem(LS.lastId);
-  if (lastId && state.data.reports.find((r) => r.id === lastId)) selectReport(lastId);
-
   // Top bar.
-  $('#btn-sync').addEventListener('click', cloudSync);
+  $('#btn-sync').addEventListener('click', () => cloudSync());
   $('#btn-theme').addEventListener('click', toggleTheme);
   $('#btn-settings').addEventListener('click', openSettings);
   $('#btn-signout').addEventListener('click', signOutDaily);
@@ -2753,7 +3073,7 @@ async function init() {
     );
     if (result.ok) {
       $('#auth-password').value = '';
-      finishCloudLogin();
+      await finishCloudLogin();
     } else {
       message.textContent = result.error;
       message.classList.remove('hidden');
@@ -2764,7 +3084,7 @@ async function init() {
 
   try {
     const session = await getCloudSession();
-    if (session) finishCloudLogin();
+    if (session) await finishCloudLogin();
   } catch (error) {
     $('#auth-error').textContent = error.message;
     $('#auth-error').classList.remove('hidden');
@@ -2775,7 +3095,10 @@ async function init() {
 
 // Runs once the app is visible (after unlock, or immediately if no lock).
 function onUnlocked() {
-  if (canSync()) cloudSync();
+  if (canSync()) {
+    subscribeCloud();
+    cloudSync();
+  }
 }
 
 document.addEventListener('DOMContentLoaded', init);

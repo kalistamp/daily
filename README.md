@@ -8,6 +8,10 @@ isolated `daily` schema in a shared Supabase project.
 
 - Supabase Auth and Row Level Security protect reports, claims, reflections,
   follow-up answers, prompts, and deletion tombstones.
+- Reports, claims, prompts, and tombstones are stored as separate rows. Saves
+  send only changed entities, and Realtime publishes only a revision signal.
+- The browser cache uses per-user IndexedDB rows; typing in a reflection or
+  follow-up no longer serializes the complete report and claim history.
 - The GitHub journal token remains device-local and read-only.
 - OpenAI, Anthropic, and Gemini keys remain device-local.
 - The Supabase URL and publishable key are public browser configuration, as
@@ -32,4 +36,8 @@ git diff --check
 Schema SQL, the private import, verification/cleanup SQL, and the migration
 guide live outside this repository in:
 
-`/home/ks/Documents/projects/daily_migration/`
+`/home/ks/Documents/projects_audit/prelaunch_deployment/daily/`
+
+Run `01_daily_delta_sync.sql` and then `02_verify_daily_security.sql` manually
+in the Supabase SQL Editor before pushing this website. Do not use a Supabase
+config push or a shared migration push for this project-specific package.

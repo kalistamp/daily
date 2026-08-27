@@ -65,6 +65,8 @@ body {
   line-height: 1.55;
 }
 
+body.lock-open { overflow: hidden; }
+
 .hidden { display: none !important; }
 .muted { color: var(--muted); }
 .tiny { font-size: 11px; }
@@ -533,6 +535,8 @@ input[type="month"], input[type="number"] { font-family: var(--mono); }
   font-size: 13.5px; color: var(--text);
   animation: toastIn .2s ease; display: flex; gap: 10px; align-items: flex-start;
 }
+
+.toast.is-leaving { opacity: 0; transition: opacity .3s; }
 .toast.ok { border-left-color: var(--ok); }
 .toast.err { border-left-color: var(--danger); }
 .toast .toast-ico { flex: none; }
