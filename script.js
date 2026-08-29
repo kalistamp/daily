@@ -93,14 +93,8 @@ const LS = {
   openrouterModel: 'msi.openrouterModel',
   mistralKey:     'msi.mistralKey',
   mistralModel:   'msi.mistralModel',
-  nvidiaKey:      'msi.nvidiaKey',
-  nvidiaModel:    'msi.nvidiaModel',
-  cloudflareKey:  'msi.cloudflareKey',
-  cloudflareModel: 'msi.cloudflareModel',
   cohereKey:      'msi.cohereKey',
   cohereModel:    'msi.cohereModel',
-  githubKey:      'msi.githubKey',
-  githubModel:    'msi.githubModel',
   huggingfaceKey: 'msi.huggingfaceKey',
   huggingfaceModel: 'msi.huggingfaceModel',
   repo:           'msi.repo',
@@ -137,14 +131,8 @@ const DEFAULTS = {
   openrouterModel: '',         // blank = Auto
   mistralKey:     '',
   mistralModel:   '',         // blank = Auto
-  nvidiaKey:      '',
-  nvidiaModel:    '',         // blank = Auto
-  cloudflareKey:  '',
-  cloudflareModel: '',         // blank = Auto
   cohereKey:      '',
   cohereModel:    '',         // blank = Auto
-  githubKey:      '',
-  githubModel:    '',         // blank = Auto
   huggingfaceKey: '',
   huggingfaceModel: '',         // blank = Auto
   repo:           'kalistamp/Daily_ng',
@@ -1239,65 +1227,6 @@ const PROVIDERS = {
     },
   }),
 
-  /* ----------------------------------------------------------- NVIDIA NIM */
-  nvidia: openAiCompatible({
-    id: 'nvidia',
-    label: 'NVIDIA NIM',
-    base: 'https://integrate.api.nvidia.com/v1',
-    fallbacks: ['meta/llama-3.3-70b-instruct', 'mistralai/mistral-small-24b-instruct', 'meta/llama-3.1-8b-instruct'],
-    keyUrl: 'https://build.nvidia.com',
-    keyCfg: 'nvidiaKey', modelCfg: 'nvidiaModel', keyInput: 'set-nvidia-key',
-    // Every entry carries the same placeholder stamp, so keeping it would sort
-    // by a constant; zeroed, the vendor's own listing order survives.
-    readModels(data) {
-      return (data.data || []).map((m) => ({ id: String(m.id), created: 0 }));
-    },
-  }),
-
-  /* -------------------------------------------------- Cloudflare Workers AI */
-  cloudflare: openAiCompatible({
-    id: 'cloudflare',
-    label: 'Cloudflare Workers AI',
-    base: 'https://api.cloudflare.com/client/v4/accounts',
-    fallbacks: [
-      '@cf/meta/llama-3.3-70b-instruct-fp8-fast',
-      '@cf/meta/llama-3.1-8b-instruct',
-      '@cf/qwen/qwen2.5-coder-32b-instruct',
-    ],
-    keyUrl: 'https://dash.cloudflare.com/profile/api-tokens',
-    keyCfg: 'cloudflareKey', modelCfg: 'cloudflareModel', keyInput: 'set-cloudflare-key',
-
-    // The one vendor here whose endpoint is per-account, so the account id has
-    // to travel with the credential. Giving this provider a second input the
-    // others don't have would fork the Settings layout, so the key is stored as
-    // "<account id>:<API token>" and split at the first colon.
-    account(key) {
-      const raw = String(key || '');
-      const i = raw.indexOf(':');
-      if (i < 1) return null;
-      const id = raw.slice(0, i).trim();
-      const token = raw.slice(i + 1).trim();
-      return (id && token) ? { id, token } : null;
-    },
-    requireAccount(key) {
-      const a = this.account(key);
-      if (!a) throw new Error('Cloudflare Workers AI needs its key entered as "account-id:API-token".');
-      return a;
-    },
-    keyHeader(key) { return { Authorization: `Bearer ${this.requireAccount(key).token}` }; },
-    chatUrl(key) {
-      return `${this.base}/${encodeURIComponent(this.requireAccount(key).id)}/ai/v1/chat/completions`;
-    },
-    modelsUrl(key) {
-      return `${this.base}/${encodeURIComponent(this.requireAccount(key).id)}/ai/models/search`
-        + '?per_page=100&task=Text%20Generation&hide_experimental=true';
-    },
-    // Cloudflare's own envelope, and models are named under `name`.
-    readModels(data) {
-      return (data.result || []).map((m) => ({ id: String(m.name), created: 0 }));
-    },
-  }),
-
   /* --------------------------------------------------------------- Cohere */
   // Cohere borrows OpenAI's request shape but not its reply: /v2/chat returns
   // one `message` whose text arrives as blocks, so parse and send are its own.
@@ -1347,26 +1276,6 @@ const PROVIDERS = {
       let score = d ? Number(d[2]) * 100 + Number(d[1]) : 0;
       if (/light|nightly|beta/.test(m.id)) score -= 100000;
       return score;
-    },
-  }),
-
-  /* -------------------------------------------------------- GitHub Models */
-  // GitHub retired Models on 2026-07-30: the inference API and the catalogue
-  // both answer HTTP 410 now, for every key. The entry is kept wired like the
-  // rest so it fails predictably instead of breaking the picker, but no key
-  // can make it work — the Settings hint says so.
-  github: openAiCompatible({
-    id: 'github',
-    label: 'GitHub Models',
-    base: 'https://models.github.ai/inference',
-    fallbacks: ['openai/gpt-4.1-mini', 'openai/gpt-4o-mini', 'meta/Llama-3.3-70B-Instruct'],
-    keyUrl: 'https://github.com/settings/personal-access-tokens',
-    keyCfg: 'githubKey', modelCfg: 'githubModel', keyInput: 'set-github-key',
-    // The catalogue sits outside /inference and answers with a bare array.
-    modelsUrl() { return 'https://models.github.ai/catalog/models'; },
-    readModels(data) {
-      const list = Array.isArray(data) ? data : (data.data || []);
-      return list.map((m) => ({ id: String(m.id || m.name), created: 0 }));
     },
   }),
 
@@ -3091,10 +3000,7 @@ function fillSettings() {
   $('#set-cerebras-key').value = c.cerebrasKey;
   $('#set-openrouter-key').value = c.openrouterKey;
   $('#set-mistral-key').value = c.mistralKey;
-  $('#set-nvidia-key').value = c.nvidiaKey;
-  $('#set-cloudflare-key').value = c.cloudflareKey;
   $('#set-cohere-key').value = c.cohereKey;
-  $('#set-github-key').value = c.githubKey;
   $('#set-huggingface-key').value = c.huggingfaceKey;
   $('#set-repo').value = c.repo;
   $('#set-notes-path').value = c.notesPath;
@@ -3285,10 +3191,7 @@ function bindSettingsInputs() {
     'set-cerebras-key': 'cerebrasKey',
     'set-openrouter-key': 'openrouterKey',
     'set-mistral-key': 'mistralKey',
-    'set-nvidia-key': 'nvidiaKey',
-    'set-cloudflare-key': 'cloudflareKey',
     'set-cohere-key': 'cohereKey',
-    'set-github-key': 'githubKey',
     'set-huggingface-key': 'huggingfaceKey',
     'set-repo': 'repo',
     'set-notes-path': 'notesPath',
