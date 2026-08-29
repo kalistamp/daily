@@ -13,7 +13,8 @@
        are kept EXCLUSIVELY in this browser's localStorage. They are
        NEVER written into the public website — only sent
        directly over HTTPS to api.github.com and, for the selected provider,
-       one of api.openai.com / api.anthropic.com / generativelanguage.googleapis.com.
+       that vendor's own endpoint (see the PROVIDER REGISTRY below for the
+       full list; every one of them is pinned in the page's CSP connect-src).
    ========================================================================== */
 
 'use strict';
@@ -84,6 +85,24 @@ const LS = {
   anthropicModel: 'msi.anthropicModel',
   geminiKey:      'msi.geminiKey',
   geminiModel:    'msi.geminiModel',
+  groqKey:        'msi.groqKey',
+  groqModel:      'msi.groqModel',
+  cerebrasKey:    'msi.cerebrasKey',
+  cerebrasModel:  'msi.cerebrasModel',
+  openrouterKey:  'msi.openrouterKey',
+  openrouterModel: 'msi.openrouterModel',
+  mistralKey:     'msi.mistralKey',
+  mistralModel:   'msi.mistralModel',
+  nvidiaKey:      'msi.nvidiaKey',
+  nvidiaModel:    'msi.nvidiaModel',
+  cloudflareKey:  'msi.cloudflareKey',
+  cloudflareModel: 'msi.cloudflareModel',
+  cohereKey:      'msi.cohereKey',
+  cohereModel:    'msi.cohereModel',
+  githubKey:      'msi.githubKey',
+  githubModel:    'msi.githubModel',
+  huggingfaceKey: 'msi.huggingfaceKey',
+  huggingfaceModel: 'msi.huggingfaceModel',
   repo:           'msi.repo',
   notesPath:      'msi.notesPath',
   branch:         'msi.branch',
@@ -110,6 +129,24 @@ const DEFAULTS = {
   anthropicModel: '',         // blank = Auto
   geminiKey:      '',
   geminiModel:    '',         // blank = Auto
+  groqKey:        '',
+  groqModel:      '',         // blank = Auto
+  cerebrasKey:    '',
+  cerebrasModel:  '',         // blank = Auto
+  openrouterKey:  '',
+  openrouterModel: '',         // blank = Auto
+  mistralKey:     '',
+  mistralModel:   '',         // blank = Auto
+  nvidiaKey:      '',
+  nvidiaModel:    '',         // blank = Auto
+  cloudflareKey:  '',
+  cloudflareModel: '',         // blank = Auto
+  cohereKey:      '',
+  cohereModel:    '',         // blank = Auto
+  githubKey:      '',
+  githubModel:    '',         // blank = Auto
+  huggingfaceKey: '',
+  huggingfaceModel: '',         // blank = Auto
   repo:           'kalistamp/Daily_ng',
   notesPath:      '2026/2026daily_pt1.md',
   branch:         'main',
@@ -134,6 +171,24 @@ const NON_CHAT_TOKENS = [
 const NON_CHAT_RE = new RegExp(`(^|[-_./])(${NON_CHAT_TOKENS.join('|')})([-_./]|$)`, 'i');
 const isChatModel = (id) => !!id && !NON_CHAT_RE.test(id);
 
+// The gateway providers serve open-weight families, where several tokens above
+// name an ordinary chat model rather than a different endpoint: "-instruct" IS
+// the chat variant on Llama, Qwen and Mistral derivatives, and gemma, learnlm
+// and vision models all answer chat requests. Applying the OpenAI-shaped list
+// to those catalogues would hide almost everything in them, which is exactly
+// the failure the deny-list exists to avoid — so they get this narrower one,
+// holding only the tokens that name a genuinely different endpoint on every
+// vendor. Providers opt in via `isChatModel` on their registry entry.
+const GATEWAY_NON_CHAT_TOKENS = [
+  'embed', 'embedding', 'embeddings', 'gecko',
+  'tts', 'stt', 'whisper', 'audio', 'speech', 'voice', 'transcribe',
+  'image', 'images', 'dall', 'dalle', 'imagen', 'veo', 'diffusion', 'flux', 'sdxl',
+  'moderation', 'moderations', 'guard', 'safety',
+  'rerank', 'reranker', 'similarity',
+];
+const GATEWAY_NON_CHAT_RE = new RegExp(`(^|[-_./])(${GATEWAY_NON_CHAT_TOKENS.join('|')})([-_./]|$)`, 'i');
+const isGatewayChatModel = (id) => !!id && !GATEWAY_NON_CHAT_RE.test(id);
+
 // Discovery results are cached per API KEY (not per session) so reopening
 // Settings doesn't re-hit the network; the Refresh button forces a re-fetch.
 const DISCOVERY_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -151,6 +206,25 @@ function apiError(message, status, detail) {
   e.status = status;
   e.detail = detail || '';
   return e;
+}
+
+// Where the message lives differs by vendor. The original three all nest it
+// under `error`, so that is checked first and their behaviour is unchanged;
+// the rest only apply when that comes back empty — Cohere and the HuggingFace
+// router put a bare string at the top level, and Cloudflare returns an
+// `errors` array. Without this the gateway adapters would report a bare status
+// code and a plain bad key would look like an unexplained failure.
+function errorDetail(data) {
+  if (!data || typeof data !== 'object') return '';
+  const e = data.error;
+  if (e && typeof e === 'object' && e.message) return String(e.message);
+  if (typeof e === 'string' && e) return e;
+  if (Array.isArray(data.errors) && data.errors[0] && data.errors[0].message) {
+    return String(data.errors[0].message);
+  }
+  if (typeof data.message === 'string' && data.message) return data.message;
+  if (typeof data.detail === 'string' && data.detail) return data.detail;
+  return '';
 }
 
 // Light local theme buckets. Substring counting — intentionally rough; the
@@ -754,6 +828,94 @@ async function dataPushNow() {
    tools, so there is no multi-turn tool loop to carry state for.
 --------------------------------------------------------------------------- */
 
+// Every provider added after the original three speaks OpenAI's
+// /chat/completions shape verbatim, so one factory covers them and each entry
+// shrinks to what actually differs: base URL, defaults, and how that vendor
+// spells its model list. It deliberately does not reuse the `openai` entry —
+// that one carries endpoint negotiation for /v1/responses, which no other
+// vendor implements, so sharing it would give all of them a probe that can
+// only ever fail.
+//
+// This app makes a single-shot summarization call and declares no tools, so
+// there is no tool plumbing here and no filtering on tool support: a model
+// that cannot call a function summarizes perfectly well.
+function openAiCompatible(spec) {
+  return Object.assign({
+    defaultModel: '',                       // blank = Auto, as everywhere here
+    isChatModel: isGatewayChatModel,
+
+    keyHeader(key) { return { Authorization: `Bearer ${key}` }; },
+    headers(key) { return Object.assign({ 'Content-Type': 'application/json' }, this.keyHeader(key)); },
+
+    // max_tokens is set, unlike the OpenAI entry above: that one omits it
+    // because the GPT-5 family renamed it max_completion_tokens, which is an
+    // OpenAI-specific quirk. These gateways all accept max_tokens, and a
+    // report truncated at some vendor's small default is a silent failure —
+    // so this matches the 8192 the Anthropic and Gemini entries use. No
+    // temperature, though: several of these serve reasoning models that
+    // reject a non-default one.
+    buildBody(model, systemText, userText) {
+      return {
+        model,
+        max_tokens: 8192,
+        messages: [
+          { role: 'system', content: systemText },
+          { role: 'user', content: userText },
+        ],
+      };
+    },
+
+    // `content` comes back as blocks from some gateways rather than a string.
+    parse(json) {
+      const c = json?.choices?.[0]?.message?.content;
+      const text = typeof c === 'string'
+        ? c
+        : (Array.isArray(c) ? c.map((b) => (b && (b.text || b.output_text)) || '').join('') : '');
+      return { text: text.trim() };
+    },
+
+    chatUrl() { return `${this.base}/chat/completions`; },
+
+    async send(model, systemText, userText, key) {
+      const res = await fetch(this.chatUrl(key), {
+        method: 'POST',
+        headers: this.headers(key),
+        body: JSON.stringify(this.buildBody(model, systemText, userText)),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw apiError(`${this.label} request failed (${res.status}).`, res.status, errorDetail(data));
+      }
+      const { text } = this.parse(data);
+      if (!text) {
+        throw new Error(`${this.label} returned no text (${data?.choices?.[0]?.finish_reason || 'empty response'}).`);
+      }
+      return { text, model, fellBack: false };
+    },
+
+    modelsUrl() { return `${this.base}/models`; },
+
+    // OpenAI's { data: [{ id, created }] }, with `created` in seconds.
+    readModels(data) {
+      return (data.data || []).map((m) => ({ id: String(m.id), created: (Number(m.created) || 0) * 1000 }));
+    },
+
+    async discover(key) {
+      const res = await fetch(this.modelsUrl(key), { headers: this.headers(key) });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw apiError(`${this.label} model list failed (${res.status}).`, res.status, errorDetail(data));
+      }
+      return this.readModels(data);
+    },
+
+    // Higher = preferred, matching the other entries. Several of these
+    // catalogues report no usable date, in which case every entry ties and the
+    // vendor's own listing order is preserved by the sort.
+    rankKey(m) { return m.created || 0; },
+  }, spec);
+}
+
 const PROVIDERS = {
   /* --------------------------------------------------------------- OpenAI */
   openai: {
@@ -1027,6 +1189,196 @@ const PROVIDERS = {
     // one provider where ranking has to fall back to a name heuristic.
     rankKey(m) { return geminiNameRank(m.id); },
   },
+
+  /* ----------------------------------------------------------------- Groq */
+  groq: openAiCompatible({
+    id: 'groq',
+    label: 'Groq',
+    base: 'https://api.groq.com/openai/v1',
+    fallbacks: ['llama-3.3-70b-versatile', 'openai/gpt-oss-120b', 'llama-3.1-8b-instant'],
+    keyUrl: 'https://console.groq.com/keys',
+    keyCfg: 'groqKey', modelCfg: 'groqModel', keyInput: 'set-groq-key',
+  }),
+
+  /* ------------------------------------------------------------- Cerebras */
+  cerebras: openAiCompatible({
+    id: 'cerebras',
+    label: 'Cerebras',
+    base: 'https://api.cerebras.ai/v1',
+    fallbacks: ['llama-3.3-70b', 'gpt-oss-120b', 'llama3.1-8b'],
+    keyUrl: 'https://cloud.cerebras.ai/platform/apikeys',
+    keyCfg: 'cerebrasKey', modelCfg: 'cerebrasModel', keyInput: 'set-cerebras-key',
+  }),
+
+  /* ----------------------------------------------------------- OpenRouter */
+  openrouter: openAiCompatible({
+    id: 'openrouter',
+    label: 'OpenRouter',
+    base: 'https://openrouter.ai/api/v1',
+    fallbacks: ['openai/gpt-4.1-mini', 'anthropic/claude-sonnet-4.5', 'google/gemini-2.5-flash'],
+    keyUrl: 'https://openrouter.ai/keys',
+    keyCfg: 'openrouterKey', modelCfg: 'openrouterModel', keyInput: 'set-openrouter-key',
+    // `created` is already in seconds here, same as OpenAI.
+  }),
+
+  /* ----------------------------------------------------------- Mistral AI */
+  mistral: openAiCompatible({
+    id: 'mistral',
+    label: 'Mistral AI',
+    base: 'https://api.mistral.ai/v1',
+    fallbacks: ['mistral-large-latest', 'mistral-medium-latest', 'mistral-small-latest'],
+    keyUrl: 'https://console.mistral.ai/api-keys',
+    keyCfg: 'mistralKey', modelCfg: 'mistralModel', keyInput: 'set-mistral-key',
+    // Mistral publishes per-model capability flags, so its embedding, OCR and
+    // moderation models are dropped on the vendor's own say-so rather than by
+    // guessing from the name. Only a positive "false" hides an entry.
+    readModels(data) {
+      return (data.data || [])
+        .filter((m) => !m.capabilities || m.capabilities.completion_chat !== false)
+        .map((m) => ({ id: String(m.id), created: (Number(m.created) || 0) * 1000 }));
+    },
+  }),
+
+  /* ----------------------------------------------------------- NVIDIA NIM */
+  nvidia: openAiCompatible({
+    id: 'nvidia',
+    label: 'NVIDIA NIM',
+    base: 'https://integrate.api.nvidia.com/v1',
+    fallbacks: ['meta/llama-3.3-70b-instruct', 'mistralai/mistral-small-24b-instruct', 'meta/llama-3.1-8b-instruct'],
+    keyUrl: 'https://build.nvidia.com',
+    keyCfg: 'nvidiaKey', modelCfg: 'nvidiaModel', keyInput: 'set-nvidia-key',
+    // Every entry carries the same placeholder stamp, so keeping it would sort
+    // by a constant; zeroed, the vendor's own listing order survives.
+    readModels(data) {
+      return (data.data || []).map((m) => ({ id: String(m.id), created: 0 }));
+    },
+  }),
+
+  /* -------------------------------------------------- Cloudflare Workers AI */
+  cloudflare: openAiCompatible({
+    id: 'cloudflare',
+    label: 'Cloudflare Workers AI',
+    base: 'https://api.cloudflare.com/client/v4/accounts',
+    fallbacks: [
+      '@cf/meta/llama-3.3-70b-instruct-fp8-fast',
+      '@cf/meta/llama-3.1-8b-instruct',
+      '@cf/qwen/qwen2.5-coder-32b-instruct',
+    ],
+    keyUrl: 'https://dash.cloudflare.com/profile/api-tokens',
+    keyCfg: 'cloudflareKey', modelCfg: 'cloudflareModel', keyInput: 'set-cloudflare-key',
+
+    // The one vendor here whose endpoint is per-account, so the account id has
+    // to travel with the credential. Giving this provider a second input the
+    // others don't have would fork the Settings layout, so the key is stored as
+    // "<account id>:<API token>" and split at the first colon.
+    account(key) {
+      const raw = String(key || '');
+      const i = raw.indexOf(':');
+      if (i < 1) return null;
+      const id = raw.slice(0, i).trim();
+      const token = raw.slice(i + 1).trim();
+      return (id && token) ? { id, token } : null;
+    },
+    requireAccount(key) {
+      const a = this.account(key);
+      if (!a) throw new Error('Cloudflare Workers AI needs its key entered as "account-id:API-token".');
+      return a;
+    },
+    keyHeader(key) { return { Authorization: `Bearer ${this.requireAccount(key).token}` }; },
+    chatUrl(key) {
+      return `${this.base}/${encodeURIComponent(this.requireAccount(key).id)}/ai/v1/chat/completions`;
+    },
+    modelsUrl(key) {
+      return `${this.base}/${encodeURIComponent(this.requireAccount(key).id)}/ai/models/search`
+        + '?per_page=100&task=Text%20Generation&hide_experimental=true';
+    },
+    // Cloudflare's own envelope, and models are named under `name`.
+    readModels(data) {
+      return (data.result || []).map((m) => ({ id: String(m.name), created: 0 }));
+    },
+  }),
+
+  /* --------------------------------------------------------------- Cohere */
+  // Cohere borrows OpenAI's request shape but not its reply: /v2/chat returns
+  // one `message` whose text arrives as blocks, so parse and send are its own.
+  cohere: openAiCompatible({
+    id: 'cohere',
+    label: 'Cohere',
+    base: 'https://api.cohere.com',
+    fallbacks: ['command-a-03-2025', 'command-r-plus-08-2024', 'command-r-08-2024'],
+    keyUrl: 'https://dashboard.cohere.com/api-keys',
+    keyCfg: 'cohereKey', modelCfg: 'cohereModel', keyInput: 'set-cohere-key',
+
+    chatUrl() { return `${this.base}/v2/chat`; },
+
+    parse(json) {
+      const c = json?.message?.content;
+      const text = typeof c === 'string'
+        ? c
+        : (Array.isArray(c) ? c.filter((b) => b && b.type === 'text').map((b) => b.text || '').join('') : '');
+      return { text: text.trim() };
+    },
+
+    async send(model, systemText, userText, key) {
+      const res = await fetch(this.chatUrl(key), {
+        method: 'POST',
+        headers: this.headers(key),
+        body: JSON.stringify(this.buildBody(model, systemText, userText)),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw apiError(`${this.label} request failed (${res.status}).`, res.status, errorDetail(data));
+      }
+      const { text } = this.parse(data);
+      if (!text) throw new Error(`${this.label} returned no text (${data?.finish_reason || 'empty response'}).`);
+      return { text, model, fellBack: false };
+    },
+
+    // endpoint=chat is the vendor's own filter, so embedding and rerank models
+    // never reach the picker.
+    modelsUrl() { return `${this.base}/v1/models?page_size=100&endpoint=chat`; },
+    readModels(data) {
+      return (data.models || []).map((m) => ({ id: String(m.name), created: 0 }));
+    },
+    // No timestamps here, but the ids end in an MM-YYYY release stamp — the
+    // only ordering signal on offer, so this ranks by name like Gemini does.
+    rankKey(m) {
+      const d = String(m.id).match(/-(\d{2})-(\d{4})$/);
+      let score = d ? Number(d[2]) * 100 + Number(d[1]) : 0;
+      if (/light|nightly|beta/.test(m.id)) score -= 100000;
+      return score;
+    },
+  }),
+
+  /* -------------------------------------------------------- GitHub Models */
+  // GitHub retired Models on 2026-07-30: the inference API and the catalogue
+  // both answer HTTP 410 now, for every key. The entry is kept wired like the
+  // rest so it fails predictably instead of breaking the picker, but no key
+  // can make it work — the Settings hint says so.
+  github: openAiCompatible({
+    id: 'github',
+    label: 'GitHub Models',
+    base: 'https://models.github.ai/inference',
+    fallbacks: ['openai/gpt-4.1-mini', 'openai/gpt-4o-mini', 'meta/Llama-3.3-70B-Instruct'],
+    keyUrl: 'https://github.com/settings/personal-access-tokens',
+    keyCfg: 'githubKey', modelCfg: 'githubModel', keyInput: 'set-github-key',
+    // The catalogue sits outside /inference and answers with a bare array.
+    modelsUrl() { return 'https://models.github.ai/catalog/models'; },
+    readModels(data) {
+      const list = Array.isArray(data) ? data : (data.data || []);
+      return list.map((m) => ({ id: String(m.id || m.name), created: 0 }));
+    },
+  }),
+
+  /* ---------------------------------------------------------- Hugging Face */
+  huggingface: openAiCompatible({
+    id: 'huggingface',
+    label: 'Hugging Face',
+    base: 'https://router.huggingface.co/v1',
+    fallbacks: ['openai/gpt-oss-120b', 'meta-llama/Llama-3.3-70B-Instruct', 'Qwen/Qwen2.5-72B-Instruct'],
+    keyUrl: 'https://huggingface.co/settings/tokens',
+    keyCfg: 'huggingfaceKey', modelCfg: 'huggingfaceModel', keyInput: 'set-huggingface-key',
+  }),
 };
 
 function isModelAvailabilityError(e) {
@@ -1068,7 +1420,7 @@ async function discoverModels(provider, key, { force = false } = {}) {
     } catch { /* ignore a corrupt cache entry */ }
   }
   const models = (await p.discover(key))
-    .filter((m) => isChatModel(m.id))
+    .filter((m) => (p.isChatModel || isChatModel)(m.id))
     .sort((a, b) => p.rankKey(b) - p.rankKey(a));
   try { localStorage.setItem(cacheKey, JSON.stringify({ at: Date.now(), models })); } catch { /* quota */ }
   return models;
@@ -2735,6 +3087,15 @@ function fillSettings() {
   $('#set-openai-key').value = c.openaiKey;
   $('#set-anthropic-key').value = c.anthropicKey;
   $('#set-gemini-key').value = c.geminiKey;
+  $('#set-groq-key').value = c.groqKey;
+  $('#set-cerebras-key').value = c.cerebrasKey;
+  $('#set-openrouter-key').value = c.openrouterKey;
+  $('#set-mistral-key').value = c.mistralKey;
+  $('#set-nvidia-key').value = c.nvidiaKey;
+  $('#set-cloudflare-key').value = c.cloudflareKey;
+  $('#set-cohere-key').value = c.cohereKey;
+  $('#set-github-key').value = c.githubKey;
+  $('#set-huggingface-key').value = c.huggingfaceKey;
   $('#set-repo').value = c.repo;
   $('#set-notes-path').value = c.notesPath;
   $('#set-branch').value = c.branch;
@@ -2920,6 +3281,15 @@ function bindSettingsInputs() {
     'set-openai-key': 'openaiKey',
     'set-anthropic-key': 'anthropicKey',
     'set-gemini-key': 'geminiKey',
+    'set-groq-key': 'groqKey',
+    'set-cerebras-key': 'cerebrasKey',
+    'set-openrouter-key': 'openrouterKey',
+    'set-mistral-key': 'mistralKey',
+    'set-nvidia-key': 'nvidiaKey',
+    'set-cloudflare-key': 'cloudflareKey',
+    'set-cohere-key': 'cohereKey',
+    'set-github-key': 'githubKey',
+    'set-huggingface-key': 'huggingfaceKey',
     'set-repo': 'repo',
     'set-notes-path': 'notesPath',
     'set-branch': 'branch',
@@ -2930,7 +3300,8 @@ function bindSettingsInputs() {
       flashSaved();
       updateChecklist();
       // A newly-entered key changes what the model picker can offer.
-      if (/^set-(openai|anthropic|gemini)-key$/.test(id)) populateModelOptions();
+      // Every provider key input ends in -key; the journal's is -token.
+      if (/-key$/.test(id)) populateModelOptions();
     });
   }
 

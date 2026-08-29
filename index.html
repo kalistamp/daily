@@ -7,7 +7,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="robots" content="noindex, nofollow" />
   <meta name="referrer" content="no-referrer" />
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; base-uri 'self'; connect-src 'self' https://baiojghilzxhkebfblzv.supabase.co wss://baiojghilzxhkebfblzv.supabase.co https://api.github.com https://api.openai.com https://api.anthropic.com https://generativelanguage.googleapis.com; form-action 'self'; frame-src 'none'; img-src 'self' data:; object-src 'none'; script-src 'self' 'sha384-fPWur1rx/DE6YtXP/x0MD6dd90RgnVsz5yX/DIg7CcVAnTBZsENWuIcpvVTM39ti' https://cdn.jsdelivr.net; style-src 'self'; upgrade-insecure-requests" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; base-uri 'self'; connect-src 'self' https://baiojghilzxhkebfblzv.supabase.co wss://baiojghilzxhkebfblzv.supabase.co https://api.github.com https://api.openai.com https://api.anthropic.com https://generativelanguage.googleapis.com https://api.groq.com https://api.cerebras.ai https://openrouter.ai https://api.mistral.ai https://integrate.api.nvidia.com https://api.cloudflare.com https://api.cohere.com https://models.github.ai https://router.huggingface.co; form-action 'self'; frame-src 'none'; img-src 'self' data:; object-src 'none'; script-src 'self' 'sha384-fPWur1rx/DE6YtXP/x0MD6dd90RgnVsz5yX/DIg7CcVAnTBZsENWuIcpvVTM39ti' https://cdn.jsdelivr.net; style-src 'self'; upgrade-insecure-requests" />
   <title>Monthly Self-Interrogation</title>
   <link rel="stylesheet" href="style.css?v=6" />
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#129504;</text></svg>" />
@@ -229,6 +229,15 @@
               <option value="openai">OpenAI</option>
               <option value="anthropic">Anthropic (Claude)</option>
               <option value="gemini">Gemini</option>
+              <option value="groq">Groq</option>
+              <option value="cerebras">Cerebras</option>
+              <option value="openrouter">OpenRouter</option>
+              <option value="mistral">Mistral AI</option>
+              <option value="nvidia">NVIDIA NIM</option>
+              <option value="cloudflare">Cloudflare Workers AI</option>
+              <option value="cohere">Cohere</option>
+              <option value="github">GitHub Models</option>
+              <option value="huggingface">Hugging Face</option>
             </select>
             <span class="field-hint">Only the selected provider's key and model are used.</span>
           </label>
@@ -265,6 +274,105 @@
             </div>
             <span class="field-hint">
               Free key from <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a>.
+            </span>
+          </label>
+
+          <label class="field hidden" data-provider-key="groq">
+            <span class="field-label">Groq API key</span>
+            <div class="input-reveal">
+              <input type="password" id="set-groq-key" placeholder="gsk_&hellip;" autocomplete="off" spellcheck="false" />
+              <button type="button" class="reveal-btn" data-reveal="set-groq-key" title="Show / hide">&#128065;</button>
+            </div>
+            <span class="field-hint">
+              Key from <a href="https://console.groq.com/keys" target="_blank" rel="noopener">console.groq.com/keys</a>.
+            </span>
+          </label>
+
+          <label class="field hidden" data-provider-key="cerebras">
+            <span class="field-label">Cerebras API key</span>
+            <div class="input-reveal">
+              <input type="password" id="set-cerebras-key" placeholder="csk-&hellip;" autocomplete="off" spellcheck="false" />
+              <button type="button" class="reveal-btn" data-reveal="set-cerebras-key" title="Show / hide">&#128065;</button>
+            </div>
+            <span class="field-hint">
+              Key from <a href="https://cloud.cerebras.ai/platform/apikeys" target="_blank" rel="noopener">cloud.cerebras.ai</a>.
+            </span>
+          </label>
+
+          <label class="field hidden" data-provider-key="openrouter">
+            <span class="field-label">OpenRouter API key</span>
+            <div class="input-reveal">
+              <input type="password" id="set-openrouter-key" placeholder="sk-or-&hellip;" autocomplete="off" spellcheck="false" />
+              <button type="button" class="reveal-btn" data-reveal="set-openrouter-key" title="Show / hide">&#128065;</button>
+            </div>
+            <span class="field-hint">
+              Key from <a href="https://openrouter.ai/keys" target="_blank" rel="noopener">openrouter.ai/keys</a>.
+            </span>
+          </label>
+
+          <label class="field hidden" data-provider-key="mistral">
+            <span class="field-label">Mistral AI API key</span>
+            <div class="input-reveal">
+              <input type="password" id="set-mistral-key" placeholder="&hellip;" autocomplete="off" spellcheck="false" />
+              <button type="button" class="reveal-btn" data-reveal="set-mistral-key" title="Show / hide">&#128065;</button>
+            </div>
+            <span class="field-hint">
+              Key from <a href="https://console.mistral.ai/api-keys" target="_blank" rel="noopener">console.mistral.ai/api-keys</a>.
+            </span>
+          </label>
+
+          <label class="field hidden" data-provider-key="nvidia">
+            <span class="field-label">NVIDIA NIM API key</span>
+            <div class="input-reveal">
+              <input type="password" id="set-nvidia-key" placeholder="nvapi-&hellip;" autocomplete="off" spellcheck="false" />
+              <button type="button" class="reveal-btn" data-reveal="set-nvidia-key" title="Show / hide">&#128065;</button>
+            </div>
+            <span class="field-hint">
+              Key from <a href="https://build.nvidia.com" target="_blank" rel="noopener">build.nvidia.com</a>. This API sends no CORS headers, so the browser blocks the call from this page &mdash; the provider is wired up and works behind a proxy, but not directly.
+            </span>
+          </label>
+
+          <label class="field hidden" data-provider-key="cloudflare">
+            <span class="field-label">Cloudflare Workers AI API key</span>
+            <div class="input-reveal">
+              <input type="password" id="set-cloudflare-key" placeholder="account-id:API-token" autocomplete="off" spellcheck="false" />
+              <button type="button" class="reveal-btn" data-reveal="set-cloudflare-key" title="Show / hide">&#128065;</button>
+            </div>
+            <span class="field-hint">
+              Key from <a href="https://dash.cloudflare.com/profile/api-tokens" target="_blank" rel="noopener">dash.cloudflare.com/profile/api-tokens</a>. Workers AI is per-account, so enter it as <code>account-id:API-token</code>. This API sends no CORS headers, so the browser blocks the call from this page &mdash; the provider is wired up and works behind a proxy, but not directly.
+            </span>
+          </label>
+
+          <label class="field hidden" data-provider-key="cohere">
+            <span class="field-label">Cohere API key</span>
+            <div class="input-reveal">
+              <input type="password" id="set-cohere-key" placeholder="&hellip;" autocomplete="off" spellcheck="false" />
+              <button type="button" class="reveal-btn" data-reveal="set-cohere-key" title="Show / hide">&#128065;</button>
+            </div>
+            <span class="field-hint">
+              Key from <a href="https://dashboard.cohere.com/api-keys" target="_blank" rel="noopener">dashboard.cohere.com/api-keys</a>.
+            </span>
+          </label>
+
+          <label class="field hidden" data-provider-key="github">
+            <span class="field-label">GitHub Models API key</span>
+            <div class="input-reveal">
+              <input type="password" id="set-github-key" placeholder="github_pat_&hellip;" autocomplete="off" spellcheck="false" />
+              <button type="button" class="reveal-btn" data-reveal="set-github-key" title="Show / hide">&#128065;</button>
+            </div>
+            <span class="field-hint">
+              Key from <a href="https://github.com/settings/personal-access-tokens" target="_blank" rel="noopener">github.com/settings/personal-access-tokens</a>. GitHub retired Models on 30 July 2026 &mdash; the API now answers HTTP 410 for every key, so this provider cannot currently reach a model.
+            </span>
+          </label>
+
+          <label class="field hidden" data-provider-key="huggingface">
+            <span class="field-label">Hugging Face API key</span>
+            <div class="input-reveal">
+              <input type="password" id="set-huggingface-key" placeholder="hf_&hellip;" autocomplete="off" spellcheck="false" />
+              <button type="button" class="reveal-btn" data-reveal="set-huggingface-key" title="Show / hide">&#128065;</button>
+            </div>
+            <span class="field-hint">
+              Key from <a href="https://huggingface.co/settings/tokens" target="_blank" rel="noopener">huggingface.co/settings/tokens</a>.
             </span>
           </label>
 
