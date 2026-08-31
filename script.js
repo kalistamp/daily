@@ -265,6 +265,15 @@ function normalizeData(d) {
   if (!out.prompts || typeof out.prompts !== 'object') out.prompts = {};
   // Reports predating the follow-up feature have no questions array.
   for (const r of out.reports) if (!Array.isArray(r.followups)) r.followups = [];
+  // Reports written before the month was derived from their entries carry
+  // whatever the target-month box held at the time, which nothing kept in step
+  // with a hand-picked date range. rangeStart/rangeEnd came from the entries
+  // themselves, so they are the authority: relabel from those.
+  for (const r of out.reports) {
+    if (!r.rangeStart || !r.rangeEnd) continue;
+    const actual = monthForRange(r.rangeStart, r.rangeEnd);
+    if (actual && r.month !== actual) r.month = actual;
+  }
   return out;
 }
 
@@ -1933,9 +1942,11 @@ async function generateReport() {
     openSettings();
     return;
   }
-  const month = $('#target-month').value || prevMonthStr();
-  const reqStart = $('#range-start').value || monthFirstDay(month);
-  const reqEnd = $('#range-end').value || monthLastDay(month);
+  // Only a default for the range — the month the report is filed under is
+  // decided below, from the entries actually read.
+  const reqMonth = $('#target-month').value || prevMonthStr();
+  const reqStart = $('#range-start').value || monthFirstDay(reqMonth);
+  const reqEnd = $('#range-end').value || monthLastDay(reqMonth);
   const provider = activeProvider();
   const btn = $('#btn-generate');
   btn.disabled = true;
@@ -1955,6 +1966,12 @@ async function generateReport() {
     // slice is sorted ascending, so first/last entries bound what was read.
     const rangeStart = slice[0].date;
     const rangeEnd = slice[slice.length - 1].date;
+
+    // File the report under the month its entries are actually in, not under
+    // whatever the month box was holding. The two can disagree, and the dates
+    // are the half that came from real data — a report read entirely from
+    // August must not be stored, listed, prompted or exported as July.
+    const month = dominantMonth(slice.map((e) => e.date), reqMonth);
 
     // Auto (blank) resolves against the live model list here, per request —
     // never frozen into storage.
@@ -2458,11 +2475,53 @@ function monthLastDay(monthStr) {
   const last = new Date(Date.UTC(y, m, 0)).getUTCDate();
   return `${monthStr}-${String(last).padStart(2, '0')}`;
 }
+// The month a set of 'YYYY-MM-DD' dates belongs to: whichever 'YYYY-MM' holds
+// the most of them, ties going to the earlier month. A range is normally one
+// month, but one read across a boundary should be labelled by where its weight
+// actually sits rather than by whichever end happened to come first.
+function dominantMonth(dates, fallback) {
+  const tally = new Map();
+  for (const d of dates) {
+    const m = /^(\d{4}-\d{2})-\d{2}$/.exec(d || '');
+    if (m) tally.set(m[1], (tally.get(m[1]) || 0) + 1);
+  }
+  let best = '';
+  for (const month of [...tally.keys()].sort()) {
+    if (!best || tally.get(month) > tally.get(best)) best = month;
+  }
+  return best || fallback || '';
+}
+// Days in an inclusive date range, so a range can be attributed to a month
+// without the entries themselves. Capped: the inputs accept any year, and an
+// absurd span should not spin the loop.
+function daysInRange(startStr, endStr) {
+  const out = [];
+  const cur = new Date(startStr + 'T00:00:00Z');
+  const end = new Date(endStr + 'T00:00:00Z');
+  if (isNaN(cur) || isNaN(end)) return out;
+  while (cur <= end && out.length < 4000) {
+    out.push(cur.toISOString().slice(0, 10));
+    cur.setUTCDate(cur.getUTCDate() + 1);
+  }
+  return out;
+}
+function monthForRange(startStr, endStr) {
+  return dominantMonth(daysInRange(startStr, endStr), (startStr || endStr || '').slice(0, 7));
+}
 // Reset the date range to span the whole selected month.
 function syncRangeToMonth() {
   const month = $('#target-month').value || prevMonthStr();
   $('#range-start').value = monthFirstDay(month);
   $('#range-end').value = monthLastDay(month);
+}
+// The reverse, which never existed: the month box drove the range but nothing
+// drove it back, so hand-picking dates in another month left the box sitting on
+// its previous-month default — and that stale value, not the dates, is what
+// went on to label the report. Programmatic .value assignment fires no change
+// event, so this and syncRangeToMonth cannot ping-pong.
+function syncMonthToRange() {
+  const month = monthForRange($('#range-start').value, $('#range-end').value);
+  if (month) $('#target-month').value = month;
 }
 function fmtDate(iso) {
   if (!iso) return '';
@@ -3476,6 +3535,8 @@ async function init() {
 
   // Generate + report actions.
   $('#target-month').addEventListener('change', syncRangeToMonth);
+  $('#range-start').addEventListener('change', syncMonthToRange);
+  $('#range-end').addEventListener('change', syncMonthToRange);
   $('#btn-generate').addEventListener('click', generateReport);
   $('#btn-copy').addEventListener('click', copyCurrentReport);
   $('#btn-download').addEventListener('click', downloadCurrentReport);
