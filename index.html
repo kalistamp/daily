@@ -4,26 +4,111 @@
 <html lang="en" data-theme="dark">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <meta name="robots" content="noindex, nofollow" />
   <meta name="referrer" content="no-referrer" />
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; base-uri 'self'; connect-src 'self' https://baiojghilzxhkebfblzv.supabase.co wss://baiojghilzxhkebfblzv.supabase.co https://api.github.com https://api.openai.com https://api.anthropic.com https://generativelanguage.googleapis.com https://api.groq.com https://api.cerebras.ai https://openrouter.ai https://api.mistral.ai https://api.cohere.com https://router.huggingface.co; form-action 'self'; frame-src 'none'; img-src 'self' data:; object-src 'none'; script-src 'self' 'sha384-fPWur1rx/DE6YtXP/x0MD6dd90RgnVsz5yX/DIg7CcVAnTBZsENWuIcpvVTM39ti' https://cdn.jsdelivr.net; style-src 'self'; upgrade-insecure-requests" />
+  <meta name="color-scheme" content="dark light" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; base-uri 'self'; connect-src 'self' https://baiojghilzxhkebfblzv.supabase.co wss://baiojghilzxhkebfblzv.supabase.co https://api.github.com https://api.openai.com https://api.anthropic.com https://generativelanguage.googleapis.com https://api.groq.com https://api.cerebras.ai https://openrouter.ai https://api.mistral.ai https://api.cohere.com https://router.huggingface.co; form-action 'self'; frame-src 'none'; img-src 'self' data:; object-src 'none'; script-src 'self' 'sha256-5eVYuI8fUGHf5YW3pItZbeq1y/s4Gh9LXu32ZQYujEk=' 'sha384-fPWur1rx/DE6YtXP/x0MD6dd90RgnVsz5yX/DIg7CcVAnTBZsENWuIcpvVTM39ti' https://cdn.jsdelivr.net; style-src 'self'; upgrade-insecure-requests" />
   <title>Monthly Self-Interrogation</title>
-  <link rel="stylesheet" href="style.css?v=6" />
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#129504;</text></svg>" />
+  <link rel="stylesheet" href="style.css?v=7" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23e0a54b' stroke-width='2'><circle cx='12' cy='12' r='9'/><circle cx='12' cy='12' r='4'/></svg>" />
+  <!-- Theme is resolved BEFORE first paint. Applying it in init() meant every
+       light-mode load flashed the dark palette first. Any edit here changes the
+       script hash in the CSP above — recompute it. -->
+  <script>document.documentElement.setAttribute('data-theme',(function(){try{var t=localStorage.getItem('msi.theme');if(t==='light'||t==='dark')return t;return matchMedia('(prefers-color-scheme: light)').matches?'light':'dark';}catch(e){return'dark';}})());</script>
 </head>
 <body>
+
+  <!-- ============================ ICON SPRITE ==========================
+       Stroked SVG replaces the dingbat and emoji codepoints this UI used to
+       render icons with (⚖ ◐ ⚙ ➒ ↻ 👁 🧠 🔒). Those picked up a different
+       weight, baseline and sometimes full colour on every platform. Defined
+       once here and referenced with <use>; `currentColor` does the theming.
+  -->
+  <svg class="svg-sprite" aria-hidden="true" focusable="false">
+    <defs>
+      <symbol id="i-mark" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="9" /><circle cx="12" cy="12" r="4" />
+        <path d="M12 1v4M12 19v4M1 12h4M19 12h4" />
+      </symbol>
+      <symbol id="i-sync" viewBox="0 0 24 24">
+        <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
+        <path d="M21 3v5h-5" />
+        <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" />
+        <path d="M8 16H3v5" />
+      </symbol>
+      <symbol id="i-scale" viewBox="0 0 24 24">
+        <path d="m16 16 3-8 3 8c-.87.65-1.92 1-3 1s-2.13-.35-3-1Z" />
+        <path d="m2 16 3-8 3 8c-.87.65-1.92 1-3 1s-2.13-.35-3-1Z" />
+        <path d="M7 21h10" /><path d="M12 3v18" />
+        <path d="M3 7h2c2 0 5-1 7-2 2 1 5 2 7 2h2" />
+      </symbol>
+      <symbol id="i-sun" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="4" />
+        <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41" />
+      </symbol>
+      <symbol id="i-moon" viewBox="0 0 24 24">
+        <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" />
+      </symbol>
+      <symbol id="i-settings" viewBox="0 0 24 24">
+        <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2Z" />
+        <circle cx="12" cy="12" r="3" />
+      </symbol>
+      <symbol id="i-signout" viewBox="0 0 24 24">
+        <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+        <path d="m16 17 5-5-5-5" /><path d="M21 12H9" />
+      </symbol>
+      <symbol id="i-panel" viewBox="0 0 24 24">
+        <rect width="18" height="18" x="3" y="3" rx="2" /><path d="M9 3v18" />
+      </symbol>
+      <symbol id="i-eye" viewBox="0 0 24 24">
+        <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z" />
+        <circle cx="12" cy="12" r="3" />
+      </symbol>
+      <symbol id="i-eye-off" viewBox="0 0 24 24">
+        <path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c6.5 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68" />
+        <path d="M6.61 6.61A13.5 13.5 0 0 0 2 12s3.5 7 10 7a9.74 9.74 0 0 0 5.39-1.61" />
+        <path d="M14.12 14.12a3 3 0 1 1-4.24-4.24" /><path d="m2 2 20 20" />
+      </symbol>
+      <symbol id="i-close" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12" /></symbol>
+      <symbol id="i-lock" viewBox="0 0 24 24">
+        <rect width="18" height="11" x="3" y="11" rx="2" />
+        <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+      </symbol>
+      <symbol id="i-copy" viewBox="0 0 24 24">
+        <rect width="14" height="14" x="8" y="8" rx="2" />
+        <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
+      </symbol>
+      <symbol id="i-download" viewBox="0 0 24 24">
+        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+        <path d="m7 10 5 5 5-5" /><path d="M12 15V3" />
+      </symbol>
+      <symbol id="i-trash" viewBox="0 0 24 24">
+        <path d="M3 6h18" />
+        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
+        <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+      </symbol>
+      <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5" /></symbol>
+      <symbol id="i-alert" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="9" /><path d="m15 9-6 6M9 9l6 6" />
+      </symbol>
+      <symbol id="i-info" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="9" /><path d="M12 16v-4M12 8h.01" />
+      </symbol>
+      <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6" /></symbol>
+    </defs>
+  </svg>
 
   <!-- ========================== SUPABASE LOGIN ========================= -->
   <div id="auth-screen" class="lock-screen" aria-hidden="false">
     <form id="auth-form" class="lock-card">
-      <div class="lock-glyph">&#129504;</div>
+      <div class="lock-glyph"><svg class="ico" aria-hidden="true"><use href="#i-mark" /></svg></div>
       <h1>Monthly Self-Interrogation</h1>
       <p class="muted">Sign in to your private reports.</p>
       <input type="email" id="auth-email" placeholder="Email" autocomplete="username" required />
       <input type="password" id="auth-password" placeholder="Password" autocomplete="current-password" required />
       <button type="submit" class="btn btn-primary btn-block" id="auth-submit">Sign in</button>
-      <p id="auth-error" class="lock-error hidden"></p>
+      <p id="auth-error" class="lock-error hidden" role="alert"></p>
     </form>
   </div>
 
@@ -32,21 +117,26 @@
        live in this browser's localStorage. Documented as such in the UI. -->
   <div id="lock-screen" class="lock-screen hidden" aria-hidden="true">
     <form id="lock-form" class="lock-card">
-      <div class="lock-glyph">&#128274;</div>
+      <div class="lock-glyph"><svg class="ico" aria-hidden="true"><use href="#i-lock" /></svg></div>
       <h1>Locked</h1>
       <p class="muted">This workspace is password-gated on this device.</p>
       <input type="password" id="lock-input" placeholder="Passphrase" autocomplete="current-password" />
       <button type="submit" class="btn btn-primary btn-block">Unlock</button>
-      <p id="lock-error" class="lock-error hidden">Incorrect passphrase.</p>
+      <p id="lock-error" class="lock-error hidden" role="alert">Incorrect passphrase.</p>
     </form>
   </div>
 
   <!-- ============================ APP SHELL ============================= -->
-  <div id="app" class="app hidden">
+  <div id="app" class="app hidden" data-sidebar="expanded">
 
     <header class="topbar">
       <div class="brand">
-        <span class="brand-mark">&#129504;</span>
+        <button id="btn-sidebar" class="btn btn-icon" type="button"
+          aria-label="Toggle sidebar" aria-expanded="true" aria-controls="sidebar"
+          title="Toggle sidebar (Ctrl+B)">
+          <svg class="ico" aria-hidden="true"><use href="#i-panel" /></svg>
+        </button>
+        <span class="brand-mark"><svg class="ico" aria-hidden="true"><use href="#i-mark" /></svg></span>
         <div class="brand-text">
           <h1>Monthly Self-Interrogation</h1>
           <p class="brand-sub">private reflection agent &middot; local-only secrets</p>
@@ -57,20 +147,41 @@
         <div id="sync-status" class="sync-status" title="Cloud sync status">
           <span class="dot"></span><span class="sync-label">not synced</span>
         </div>
-        <button id="btn-sync" class="btn btn-ghost" title="Synchronize with Supabase">
-          <span class="ico">&#8635;</span><span class="btn-label">Cloud Sync</span>
+        <button id="btn-sync" class="btn btn-ghost btn-icon-collapse" type="button" title="Synchronize with Supabase">
+          <svg class="ico" aria-hidden="true"><use href="#i-sync" /></svg><span class="btn-label">Cloud Sync</span>
         </button>
-        <button id="btn-ledger" class="btn btn-icon" title="Claims ledger">&#9878;</button>
-        <button id="btn-theme" class="btn btn-icon" title="Toggle light / dark">&#9681;</button>
-        <button id="btn-settings" class="btn btn-icon" title="Settings">&#9881;</button>
-        <button id="btn-signout" class="btn btn-icon" title="Sign out">&#10162;</button>
+        <button id="btn-ledger" class="btn btn-icon" type="button" aria-label="Claims ledger" title="Claims ledger">
+          <svg class="ico" aria-hidden="true"><use href="#i-scale" /></svg>
+        </button>
+        <button id="btn-theme" class="btn btn-icon" type="button" aria-label="Toggle light or dark theme" title="Toggle light / dark">
+          <svg class="ico ico-sun" aria-hidden="true"><use href="#i-sun" /></svg>
+          <svg class="ico ico-moon" aria-hidden="true"><use href="#i-moon" /></svg>
+        </button>
+        <button id="btn-settings" class="btn btn-icon" type="button" aria-label="Settings" title="Settings">
+          <svg class="ico" aria-hidden="true"><use href="#i-settings" /></svg>
+        </button>
+        <button id="btn-signout" class="btn btn-icon" type="button" aria-label="Sign out" title="Sign out">
+          <svg class="ico" aria-hidden="true"><use href="#i-signout" /></svg>
+        </button>
       </div>
     </header>
 
     <div class="layout">
 
+      <!-- Dismisses the drawer on small screens; inert above 900px. -->
+      <div class="sidebar-scrim" data-close-sidebar aria-hidden="true"></div>
+
       <!-- ------------------------- SIDEBAR ------------------------------ -->
-      <aside class="sidebar">
+      <aside class="sidebar" id="sidebar" aria-label="Reports and generation">
+        <!-- Drawer-only. Open, the panel covers the topbar, so the control that
+             opened it is no longer reachable; this is the way back out. -->
+        <div class="sidebar-head">
+          <span class="card-title">Reports</span>
+          <button class="btn btn-icon" type="button" data-close-sidebar aria-label="Close sidebar" title="Close">
+            <svg class="ico" aria-hidden="true"><use href="#i-close" /></svg>
+          </button>
+        </div>
+
         <div class="card generate-card">
           <h2 class="card-title">Generate report</h2>
 
@@ -89,11 +200,11 @@
             <input type="date" id="range-end" />
           </label>
 
-          <button id="btn-generate" class="btn btn-primary btn-block">
+          <button id="btn-generate" class="btn btn-primary btn-block" type="button">
             Generate Monthly Report
           </button>
 
-          <div id="progress" class="progress hidden">
+          <div id="progress" class="progress hidden" role="status">
             <div class="spinner"></div>
             <span id="progress-text">Working&hellip;</span>
           </div>
@@ -119,16 +230,36 @@
       <main class="main">
 
         <section id="empty-state" class="empty-state">
-          <div class="empty-glyph">&#129504;</div>
+          <div class="empty-glyph"><svg class="ico" aria-hidden="true"><use href="#i-mark" /></svg></div>
           <h2>No report loaded</h2>
           <p class="muted">
-            Add your keys in <button class="linkbtn" data-open-settings>Settings</button>,
+            Add your keys in <button class="linkbtn" type="button" data-open-settings>Settings</button>,
             pick a month, then generate. Or open a past report from History.
           </p>
+          <!-- Each row opens the setting it is asking for, rather than only
+               reporting that something is missing. -->
           <ul class="checklist" id="setup-checklist">
-            <li data-check="token"><span class="chk"></span> Journal token</li>
-            <li data-check="account"><span class="chk"></span> Supabase account</li>
-            <li data-check="apikey"><span class="chk"></span> Provider API key</li>
+            <li data-check="token">
+              <button type="button" data-open-settings>
+                <span class="chk"></span>
+                <span class="chk-label">Journal token</span>
+                <svg class="ico ico-sm chk-go" aria-hidden="true"><use href="#i-chevron" /></svg>
+              </button>
+            </li>
+            <li data-check="account">
+              <button type="button" data-open-settings>
+                <span class="chk"></span>
+                <span class="chk-label">Supabase account</span>
+                <svg class="ico ico-sm chk-go" aria-hidden="true"><use href="#i-chevron" /></svg>
+              </button>
+            </li>
+            <li data-check="apikey">
+              <button type="button" data-open-settings>
+                <span class="chk"></span>
+                <span class="chk-label">Provider API key</span>
+                <svg class="ico ico-sm chk-go" aria-hidden="true"><use href="#i-chevron" /></svg>
+              </button>
+            </li>
           </ul>
         </section>
 
@@ -146,9 +277,15 @@
               <div class="theme-tags" id="theme-tags"></div>
             </div>
             <div class="report-tools">
-              <button id="btn-copy" class="btn btn-ghost" title="Copy markdown">Copy</button>
-              <button id="btn-download" class="btn btn-ghost" title="Download .md">Download</button>
-              <button id="btn-delete" class="btn btn-danger-ghost" title="Delete this report">Delete</button>
+              <button id="btn-copy" class="btn btn-ghost" type="button" title="Copy markdown">
+                <svg class="ico ico-sm" aria-hidden="true"><use href="#i-copy" /></svg><span>Copy</span>
+              </button>
+              <button id="btn-download" class="btn btn-ghost" type="button" title="Download .md">
+                <svg class="ico ico-sm" aria-hidden="true"><use href="#i-download" /></svg><span>Download</span>
+              </button>
+              <button id="btn-delete" class="btn btn-danger-ghost" type="button" title="Delete this report">
+                <svg class="ico ico-sm" aria-hidden="true"><use href="#i-trash" /></svg><span>Delete</span>
+              </button>
             </div>
           </div>
 
@@ -159,8 +296,8 @@
               <h3 class="card-title">Follow-up questions</h3>
               <span id="followup-status" class="muted tiny"></span>
               <div class="fu-actions">
-                <button id="btn-regen" class="btn btn-ghost btn-mini" title="Rewrite this month's report using your answers">Regenerate with answers</button>
-                <button id="btn-followups" class="btn btn-ghost btn-mini" title="Generate more follow-up questions">Ask follow-ups</button>
+                <button id="btn-regen" class="btn btn-ghost btn-mini" type="button" title="Rewrite this month's report using your answers">Regenerate with answers</button>
+                <button id="btn-followups" class="btn btn-ghost btn-mini" type="button" title="Generate more follow-up questions">Ask follow-ups</button>
               </div>
             </div>
             <p class="followup-note muted tiny">
@@ -192,7 +329,9 @@
     <div class="modal-card">
       <div class="modal-head">
         <h2 id="settings-title">Settings</h2>
-        <button class="btn btn-icon" data-close-settings title="Close">&times;</button>
+        <button class="btn btn-icon" type="button" data-close-settings aria-label="Close settings" title="Close">
+          <svg class="ico" aria-hidden="true"><use href="#i-close" /></svg>
+        </button>
       </div>
 
       <div class="modal-body">
@@ -209,7 +348,10 @@
             <span class="field-label">Journal token &mdash; read-only</span>
             <div class="input-reveal">
               <input type="password" id="set-github-token" placeholder="github_pat_… (Contents: Read-only)" autocomplete="off" spellcheck="false" />
-              <button type="button" class="reveal-btn" data-reveal="set-github-token" title="Show / hide">&#128065;</button>
+              <button type="button" class="reveal-btn" data-reveal="set-github-token" aria-pressed="false" aria-label="Show or hide value" title="Show / hide">
+                <svg class="ico ico-sm ico-show" aria-hidden="true"><use href="#i-eye" /></svg>
+                <svg class="ico ico-sm ico-hide" aria-hidden="true"><use href="#i-eye-off" /></svg>
+              </button>
             </div>
             <span class="field-hint">Contents: <strong>Read-only</strong> on the journal repo. Used only to read your notes.</span>
           </label>
@@ -245,7 +387,10 @@
             <span class="field-label">OpenAI API key</span>
             <div class="input-reveal">
               <input type="password" id="set-openai-key" placeholder="sk-&hellip;" autocomplete="off" spellcheck="false" />
-              <button type="button" class="reveal-btn" data-reveal="set-openai-key" title="Show / hide">&#128065;</button>
+              <button type="button" class="reveal-btn" data-reveal="set-openai-key" aria-pressed="false" aria-label="Show or hide value" title="Show / hide">
+                <svg class="ico ico-sm ico-show" aria-hidden="true"><use href="#i-eye" /></svg>
+                <svg class="ico ico-sm ico-hide" aria-hidden="true"><use href="#i-eye-off" /></svg>
+              </button>
             </div>
             <span class="field-hint">
               Key from <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener">platform.openai.com/api-keys</a>.
@@ -256,7 +401,10 @@
             <span class="field-label">Anthropic API key</span>
             <div class="input-reveal">
               <input type="password" id="set-anthropic-key" placeholder="sk-ant-&hellip;" autocomplete="off" spellcheck="false" />
-              <button type="button" class="reveal-btn" data-reveal="set-anthropic-key" title="Show / hide">&#128065;</button>
+              <button type="button" class="reveal-btn" data-reveal="set-anthropic-key" aria-pressed="false" aria-label="Show or hide value" title="Show / hide">
+                <svg class="ico ico-sm ico-show" aria-hidden="true"><use href="#i-eye" /></svg>
+                <svg class="ico ico-sm ico-hide" aria-hidden="true"><use href="#i-eye-off" /></svg>
+              </button>
             </div>
             <span class="field-hint">
               Key from <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">console.anthropic.com</a>.
@@ -267,7 +415,10 @@
             <span class="field-label">Gemini API key</span>
             <div class="input-reveal">
               <input type="password" id="set-gemini-key" placeholder="AIza&hellip;" autocomplete="off" spellcheck="false" />
-              <button type="button" class="reveal-btn" data-reveal="set-gemini-key" title="Show / hide">&#128065;</button>
+              <button type="button" class="reveal-btn" data-reveal="set-gemini-key" aria-pressed="false" aria-label="Show or hide value" title="Show / hide">
+                <svg class="ico ico-sm ico-show" aria-hidden="true"><use href="#i-eye" /></svg>
+                <svg class="ico ico-sm ico-hide" aria-hidden="true"><use href="#i-eye-off" /></svg>
+              </button>
             </div>
             <span class="field-hint">
               Free key from <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a>.
@@ -278,7 +429,10 @@
             <span class="field-label">Groq API key</span>
             <div class="input-reveal">
               <input type="password" id="set-groq-key" placeholder="gsk_&hellip;" autocomplete="off" spellcheck="false" />
-              <button type="button" class="reveal-btn" data-reveal="set-groq-key" title="Show / hide">&#128065;</button>
+              <button type="button" class="reveal-btn" data-reveal="set-groq-key" aria-pressed="false" aria-label="Show or hide value" title="Show / hide">
+                <svg class="ico ico-sm ico-show" aria-hidden="true"><use href="#i-eye" /></svg>
+                <svg class="ico ico-sm ico-hide" aria-hidden="true"><use href="#i-eye-off" /></svg>
+              </button>
             </div>
             <span class="field-hint">
               Key from <a href="https://console.groq.com/keys" target="_blank" rel="noopener">console.groq.com/keys</a>.
@@ -289,7 +443,10 @@
             <span class="field-label">Cerebras API key</span>
             <div class="input-reveal">
               <input type="password" id="set-cerebras-key" placeholder="csk-&hellip;" autocomplete="off" spellcheck="false" />
-              <button type="button" class="reveal-btn" data-reveal="set-cerebras-key" title="Show / hide">&#128065;</button>
+              <button type="button" class="reveal-btn" data-reveal="set-cerebras-key" aria-pressed="false" aria-label="Show or hide value" title="Show / hide">
+                <svg class="ico ico-sm ico-show" aria-hidden="true"><use href="#i-eye" /></svg>
+                <svg class="ico ico-sm ico-hide" aria-hidden="true"><use href="#i-eye-off" /></svg>
+              </button>
             </div>
             <span class="field-hint">
               Key from <a href="https://cloud.cerebras.ai/platform/apikeys" target="_blank" rel="noopener">cloud.cerebras.ai</a>.
@@ -300,7 +457,10 @@
             <span class="field-label">OpenRouter API key</span>
             <div class="input-reveal">
               <input type="password" id="set-openrouter-key" placeholder="sk-or-&hellip;" autocomplete="off" spellcheck="false" />
-              <button type="button" class="reveal-btn" data-reveal="set-openrouter-key" title="Show / hide">&#128065;</button>
+              <button type="button" class="reveal-btn" data-reveal="set-openrouter-key" aria-pressed="false" aria-label="Show or hide value" title="Show / hide">
+                <svg class="ico ico-sm ico-show" aria-hidden="true"><use href="#i-eye" /></svg>
+                <svg class="ico ico-sm ico-hide" aria-hidden="true"><use href="#i-eye-off" /></svg>
+              </button>
             </div>
             <span class="field-hint">
               Key from <a href="https://openrouter.ai/keys" target="_blank" rel="noopener">openrouter.ai/keys</a>.
@@ -311,7 +471,10 @@
             <span class="field-label">Mistral AI API key</span>
             <div class="input-reveal">
               <input type="password" id="set-mistral-key" placeholder="&hellip;" autocomplete="off" spellcheck="false" />
-              <button type="button" class="reveal-btn" data-reveal="set-mistral-key" title="Show / hide">&#128065;</button>
+              <button type="button" class="reveal-btn" data-reveal="set-mistral-key" aria-pressed="false" aria-label="Show or hide value" title="Show / hide">
+                <svg class="ico ico-sm ico-show" aria-hidden="true"><use href="#i-eye" /></svg>
+                <svg class="ico ico-sm ico-hide" aria-hidden="true"><use href="#i-eye-off" /></svg>
+              </button>
             </div>
             <span class="field-hint">
               Key from <a href="https://console.mistral.ai/api-keys" target="_blank" rel="noopener">console.mistral.ai/api-keys</a>.
@@ -322,7 +485,10 @@
             <span class="field-label">Cohere API key</span>
             <div class="input-reveal">
               <input type="password" id="set-cohere-key" placeholder="&hellip;" autocomplete="off" spellcheck="false" />
-              <button type="button" class="reveal-btn" data-reveal="set-cohere-key" title="Show / hide">&#128065;</button>
+              <button type="button" class="reveal-btn" data-reveal="set-cohere-key" aria-pressed="false" aria-label="Show or hide value" title="Show / hide">
+                <svg class="ico ico-sm ico-show" aria-hidden="true"><use href="#i-eye" /></svg>
+                <svg class="ico ico-sm ico-hide" aria-hidden="true"><use href="#i-eye-off" /></svg>
+              </button>
             </div>
             <span class="field-hint">
               Key from <a href="https://dashboard.cohere.com/api-keys" target="_blank" rel="noopener">dashboard.cohere.com/api-keys</a>.
@@ -333,7 +499,10 @@
             <span class="field-label">Hugging Face API key</span>
             <div class="input-reveal">
               <input type="password" id="set-huggingface-key" placeholder="hf_&hellip;" autocomplete="off" spellcheck="false" />
-              <button type="button" class="reveal-btn" data-reveal="set-huggingface-key" title="Show / hide">&#128065;</button>
+              <button type="button" class="reveal-btn" data-reveal="set-huggingface-key" aria-pressed="false" aria-label="Show or hide value" title="Show / hide">
+                <svg class="ico ico-sm ico-show" aria-hidden="true"><use href="#i-eye" /></svg>
+                <svg class="ico ico-sm ico-hide" aria-hidden="true"><use href="#i-eye-off" /></svg>
+              </button>
             </div>
             <span class="field-hint">
               Key from <a href="https://huggingface.co/settings/tokens" target="_blank" rel="noopener">huggingface.co/settings/tokens</a>.
@@ -420,7 +589,7 @@
 
       <div class="modal-foot">
         <span id="settings-saved" class="muted tiny">changes auto-save</span>
-        <button class="btn btn-primary" data-close-settings>Done</button>
+        <button class="btn btn-primary" type="button" data-close-settings>Done</button>
       </div>
     </div>
   </div>
@@ -434,32 +603,34 @@
     <div class="modal-card modal-wide">
       <div class="modal-head">
         <h2 id="ledger-title">Claims ledger</h2>
-        <button class="btn btn-icon" data-close-ledger title="Close">&times;</button>
+        <button class="btn btn-icon" type="button" data-close-ledger aria-label="Close claims ledger" title="Close">
+          <svg class="ico" aria-hidden="true"><use href="#i-close" /></svg>
+        </button>
       </div>
 
       <div class="ledger-bar">
         <button type="button" id="btn-extract" class="btn btn-primary">Extract from journal</button>
-        <span id="ledger-status" class="ledger-status muted"></span>
+        <span id="ledger-status" class="ledger-status muted" role="status"></span>
       </div>
 
       <div class="modal-body" id="ledger-body"></div>
 
       <div class="modal-foot">
         <span class="muted ledger-foot-note">Stored in Supabase. The journal is never written to.</span>
-        <button class="btn btn-primary" data-close-ledger>Done</button>
+        <button class="btn btn-primary" type="button" data-close-ledger>Done</button>
       </div>
     </div>
   </div>
 
   <!-- Confirm dialog (for destructive actions, avoids native blocking modals). -->
-  <div id="confirm-modal" class="modal hidden" role="dialog" aria-modal="true">
+  <div id="confirm-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
     <div class="modal-backdrop"></div>
     <div class="modal-card modal-sm">
       <div class="modal-head"><h2 id="confirm-title">Are you sure?</h2></div>
       <div class="modal-body"><p id="confirm-text" class="muted"></p></div>
       <div class="modal-foot">
-        <button id="confirm-cancel" class="btn btn-ghost">Cancel</button>
-        <button id="confirm-ok" class="btn btn-danger">Confirm</button>
+        <button id="confirm-cancel" class="btn btn-ghost" type="button">Cancel</button>
+        <button id="confirm-ok" class="btn btn-danger" type="button">Confirm</button>
       </div>
     </div>
   </div>
@@ -472,6 +643,6 @@
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.111.0/dist/umd/supabase.min.js"
     integrity="sha384-fPWur1rx/DE6YtXP/x0MD6dd90RgnVsz5yX/DIg7CcVAnTBZsENWuIcpvVTM39ti"
     crossorigin="anonymous" referrerpolicy="no-referrer"></script>
-  <script src="script.js?v=6"></script>
+  <script src="script.js?v=7"></script>
 </body>
 </html>

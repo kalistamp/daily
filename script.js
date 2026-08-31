@@ -101,6 +101,7 @@ const LS = {
   notesPath:      'msi.notesPath',
   branch:         'msi.branch',
   theme:          'msi.theme',
+  sidebar:        'msi.sidebar',
   passHash:       'msi.passHash',
   // key string kept as-is: renaming it would orphan every device's cache
   cache:          'msi.gistCache',
@@ -1831,6 +1832,9 @@ function setSync(kind, label) {
   const el = $('#sync-status');
   el.className = 'sync-status' + (kind ? ' is-' + kind : '');
   $('.sync-label', el).textContent = label;
+  // The sync button's own icon spins while a sync is in flight, so the state is
+  // legible from the control you pressed and not only from the status pill.
+  $('#btn-sync').classList.toggle('is-busy', kind === 'busy');
 }
 function schedulePush() {
   setSync('dirty', 'unsynced');
@@ -2117,8 +2121,13 @@ function renderHistory() {
   }
   list.innerHTML = '';
   for (const r of reports) {
+    // A <button> inside the <li>: these rows were plain list items with a click
+    // handler, so they could not be reached or activated from the keyboard.
     const li = document.createElement('li');
-    li.className = 'history-item' + (r.id === state.currentId ? ' active' : '');
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'history-item' + (r.id === state.currentId ? ' active' : '');
+    if (r.id === state.currentId) item.setAttribute('aria-current', 'true');
     const modelLabel = r.provider ? `${providerLabel(r.provider)} · ${r.model}` : r.model;
     const range = (r.rangeStart && r.rangeEnd) ? fmtDayRange(r.rangeStart, r.rangeEnd) : '';
     const month = document.createElement('span');
@@ -2144,8 +2153,13 @@ function renderHistory() {
       reflected.textContent = '· reflected';
       sub.appendChild(reflected);
     }
-    li.append(month, sub);
-    li.addEventListener('click', () => selectReport(r.id));
+    item.append(month, sub);
+    item.addEventListener('click', () => {
+      selectReport(r.id);
+      // On a phone the drawer is covering the report that was just opened.
+      if (compactView()) setSidebar(false);
+    });
+    li.appendChild(item);
     list.appendChild(li);
   }
 }
@@ -2479,9 +2493,12 @@ function clampInt(v, min, max, dflt) {
 }
 
 /* ================================================================ theme */
-function applyTheme(t) {
+// `persist` is false on boot: with no stored choice the app should keep
+// following the system preference rather than freezing whatever it resolved to
+// the first time it ran.
+function applyTheme(t, persist = true) {
   document.documentElement.setAttribute('data-theme', t);
-  localStorage.setItem(LS.theme, t);
+  if (persist) localStorage.setItem(LS.theme, t);
 }
 function toggleTheme() {
   const cur = document.documentElement.getAttribute('data-theme');
@@ -2915,21 +2932,134 @@ function renderLedger() {
     group('Settled', settled.slice(0, 30));
 }
 
+// Render before showing, so focus lands on populated content rather than on an
+// empty body that fills in a frame later.
 function openLedger() {
-  $('#ledger-modal').classList.remove('hidden');
   renderLedger();
+  openModal($('#ledger-modal'));
 }
-function closeLedger() { $('#ledger-modal').classList.add('hidden'); }
+function closeLedger() { closeModal($('#ledger-modal')); }
+
+/* ================================================================= shake */
+// Rejected credentials get a physical answer as well as a written one. Reading
+// offsetWidth forces a reflow so the animation restarts on a repeated failure
+// instead of only playing the first time.
+function shake(el) {
+  if (!el) return;
+  el.classList.remove('shake');
+  void el.offsetWidth;
+  el.classList.add('shake');
+}
 
 /* =============================================================== toasts */
 function toast(msg, kind = '') {
   const wrap = $('#toasts');
   const el = document.createElement('div');
   el.className = 'toast ' + kind;
-  const ico = kind === 'ok' ? '✓' : kind === 'err' ? '✕' : 'ℹ';
-  el.innerHTML = `<span class="toast-ico">${ico}</span><span>${escapeHtml(msg)}</span>`;
+  const ico = kind === 'ok' ? 'i-check' : kind === 'err' ? 'i-alert' : 'i-info';
+  el.innerHTML =
+    `<svg class="ico ico-sm toast-ico" aria-hidden="true"><use href="#${ico}"/></svg>` +
+    `<span>${escapeHtml(msg)}</span>`;
   wrap.appendChild(el);
   setTimeout(() => { el.classList.add('is-leaving'); setTimeout(() => el.remove(), 300); }, kind === 'err' ? 6000 : 3800);
+}
+
+/* ================================================================ overlays */
+/* ----------------------------------------------------------------------------
+   Dialogs previously appeared and vanished with a bare `.hidden` toggle. That
+   left four things unhandled: no exit animation, no scroll lock (the page
+   scrolled behind an open dialog), no focus containment, and focus was never
+   returned to the control that opened it. Every overlay routes through here so
+   all four behave identically, and so Escape works on the confirm dialog too.
+---------------------------------------------------------------------------- */
+const FOCUSABLE =
+  'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), ' +
+  'textarea:not([disabled]), summary, [tabindex]:not([tabindex="-1"])';
+
+// Matches --dur-fast in the stylesheet: how long the node is held on screen so
+// the close animation can play before it is hidden.
+const CLOSE_MS = 150;
+
+// A stack, not a flag: the confirm dialog opens on top of the ledger.
+const overlayStack = [];
+
+const visibleFocusable = (root) =>
+  $$(FOCUSABLE, root).filter((el) => el.offsetWidth > 0 || el.offsetHeight > 0);
+
+const topOverlay = () =>
+  (overlayStack.length ? overlayStack[overlayStack.length - 1].modal : null);
+
+// One place decides whether the background may scroll: any open dialog, the
+// mobile drawer, or the lock screen.
+function syncScrollLock() {
+  const locked = !$('#lock-screen').classList.contains('hidden');
+  const drawer = compactView() && sidebarOpen();
+  document.body.classList.toggle('scroll-lock', overlayStack.length > 0 || drawer || locked);
+}
+
+function openModal(modal) {
+  if (!modal.classList.contains('hidden')) return;
+  modal.classList.remove('hidden', 'is-closing');
+  overlayStack.push({ modal, restore: document.activeElement });
+  syncScrollLock();
+  const first = visibleFocusable(modal)[0];
+  if (first) first.focus();
+}
+
+function closeModal(modal) {
+  if (!modal || modal.classList.contains('hidden') || modal.classList.contains('is-closing')) return;
+  const i = overlayStack.findIndex((o) => o.modal === modal);
+  const entry = i === -1 ? null : overlayStack.splice(i, 1)[0];
+  modal.classList.add('is-closing');
+  setTimeout(() => {
+    modal.classList.add('hidden');
+    modal.classList.remove('is-closing');
+  }, CLOSE_MS);
+  syncScrollLock();
+  // Announced so a promise-based dialog can settle when it is dismissed by
+  // Escape or the backdrop rather than by its own buttons.
+  modal.dispatchEvent(new CustomEvent('overlay:close'));
+  if (entry && entry.restore && document.contains(entry.restore)) entry.restore.focus();
+}
+
+// Tab is confined to the topmost dialog; Escape closes it. With no dialog open,
+// Escape dismisses the mobile drawer.
+function onOverlayKeydown(e) {
+  const modal = topOverlay();
+  if (!modal) {
+    if (e.key === 'Escape' && compactView() && sidebarOpen()) setSidebar(false);
+    return;
+  }
+  if (e.key === 'Escape') { e.preventDefault(); closeModal(modal); return; }
+  if (e.key !== 'Tab') return;
+  const items = visibleFocusable(modal);
+  if (!items.length) return;
+  const first = items[0];
+  const last = items[items.length - 1];
+  if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+  else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+}
+
+/* ================================================================= sidebar */
+/* Below 900px the sidebar is an overlay drawer. It used to stack ABOVE main, so
+   every trip from History to a report scrolled past the whole generate form. */
+const compactMQ = window.matchMedia('(max-width: 900px)');
+const compactView = () => compactMQ.matches;
+const sidebarOpen = () => $('#app').getAttribute('data-sidebar') === 'expanded';
+
+function setSidebar(open, persist = true) {
+  $('#app').setAttribute('data-sidebar', open ? 'expanded' : 'collapsed');
+  $('#btn-sidebar').setAttribute('aria-expanded', String(open));
+  // Only the desktop preference is remembered. On a phone the drawer covers the
+  // report, so it always starts closed regardless of how it was last left.
+  if (persist && !compactView()) localStorage.setItem(LS.sidebar, open ? '1' : '0');
+  syncScrollLock();
+}
+
+const toggleSidebar = () => setSidebar(!sidebarOpen());
+
+function applySidebarForViewport() {
+  setSidebar(compactView() ? false : localStorage.getItem(LS.sidebar) !== '0', false);
 }
 
 /* =========================================================== confirm modal */
@@ -2938,17 +3068,26 @@ function confirmDialog(title, text) {
     const modal = $('#confirm-modal');
     $('#confirm-title').textContent = title;
     $('#confirm-text').textContent = text;
-    modal.classList.remove('hidden');
-    const cleanup = (val) => {
-      modal.classList.add('hidden');
+    let settled = false;
+    const finish = (val) => {
+      if (settled) return;
+      settled = true;
       $('#confirm-ok').removeEventListener('click', ok);
       $('#confirm-cancel').removeEventListener('click', cancel);
+      modal.removeEventListener('overlay:close', dismissed);
+      closeModal(modal);
       resolve(val);
     };
-    const ok = () => cleanup(true);
-    const cancel = () => cleanup(false);
+    const ok = () => finish(true);
+    const cancel = () => finish(false);
+    // Escape and backdrop clicks go through closeModal, which fires this — so a
+    // dismissed dialog resolves false instead of leaving the caller awaiting
+    // forever.
+    const dismissed = () => finish(false);
     $('#confirm-ok').addEventListener('click', ok);
     $('#confirm-cancel').addEventListener('click', cancel);
+    modal.addEventListener('overlay:close', dismissed);
+    openModal(modal);
   });
 }
 
@@ -2957,9 +3096,9 @@ function confirmDialog(title, text) {
 // since this modal was last built.
 function openSettings() {
   fillAdvicePrompt();
-  $('#settings-modal').classList.remove('hidden');
+  openModal($('#settings-modal'));
 }
-function closeSettings() { $('#settings-modal').classList.add('hidden'); }
+function closeSettings() { closeModal($('#settings-modal')); }
 
 /* ------------------------------------------------------- advice directive */
 function fillAdvicePrompt() {
@@ -3073,7 +3212,7 @@ function updateModelHint(provider = activeProvider(), count = null) {
 
 function flashSaved() {
   const el = $('#settings-saved');
-  el.textContent = 'saved ✓';
+  el.textContent = 'saved';
   clearTimeout(flashSaved._t);
   flashSaved._t = setTimeout(() => (el.textContent = 'changes auto-save'), 1200);
 }
@@ -3145,14 +3284,16 @@ async function sha256Hex(str) {
 function isLocked() { return !!localStorage.getItem(LS.passHash); }
 function showLock() {
   $('#lock-screen').classList.remove('hidden');
+  $('#lock-screen').setAttribute('aria-hidden', 'false');
   $('#app').setAttribute('aria-hidden', 'true');
-  document.body.classList.add('lock-open');
+  syncScrollLock();
   setTimeout(() => $('#lock-input').focus(), 50);
 }
 function hideLock() {
   $('#lock-screen').classList.add('hidden');
+  $('#lock-screen').setAttribute('aria-hidden', 'true');
   $('#app').removeAttribute('aria-hidden');
-  document.body.classList.remove('lock-open');
+  syncScrollLock();
 }
 
 async function finishCloudLogin() {
@@ -3165,7 +3306,11 @@ async function finishCloudLogin() {
     if (lastId && state.data.reports.find((r) => r.id === lastId)) selectReport(lastId);
   }
   $('#auth-screen').classList.add('hidden');
+  $('#auth-screen').setAttribute('aria-hidden', 'true');
   $('#app').classList.remove('hidden');
+  // The drawer state depends on the viewport, which is only meaningful once the
+  // shell is actually on screen.
+  applySidebarForViewport();
   fillSettings();
   updateChecklist();
   if (isLocked()) showLock();
@@ -3257,7 +3402,11 @@ function bindReveal() {
   $$('.reveal-btn').forEach((btn) => {
     btn.addEventListener('click', () => {
       const inp = document.getElementById(btn.dataset.reveal);
-      inp.type = inp.type === 'password' ? 'text' : 'password';
+      const revealing = inp.type === 'password';
+      inp.type = revealing ? 'text' : 'password';
+      // Drives both the assistive-tech state and which of the two glyphs the
+      // stylesheet shows.
+      btn.setAttribute('aria-pressed', String(revealing));
     });
   });
 }
@@ -3268,9 +3417,14 @@ async function init() {
    'msi.data' + 'Branch'].forEach((key) => localStorage.removeItem(key));
   loadCfg();
 
-  // Theme (respect stored pref, else system).
+  // Theme (respect stored pref, else system). The inline <head> script already
+  // resolved this before first paint; this only keeps the JS state in step.
   const storedTheme = localStorage.getItem(LS.theme);
-  applyTheme(storedTheme || (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'));
+  applyTheme(
+    storedTheme || (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'),
+    Boolean(storedTheme)
+  );
+  applySidebarForViewport();
 
   // Defaults for controls.
   $('#target-month').value = prevMonthStr();
@@ -3288,6 +3442,24 @@ async function init() {
   $('#btn-signout').addEventListener('click', signOutDaily);
   $$('[data-close-settings]').forEach((el) => el.addEventListener('click', closeSettings));
   $$('[data-open-settings]').forEach((el) => el.addEventListener('click', openSettings));
+
+  // Sidebar: button, scrim, Ctrl/Cmd+B, and a re-resolve when the viewport
+  // crosses the drawer breakpoint.
+  $('#btn-sidebar').addEventListener('click', toggleSidebar);
+  $$('[data-close-sidebar]').forEach((el) => el.addEventListener('click', () => setSidebar(false)));
+  compactMQ.addEventListener('change', applySidebarForViewport);
+  document.addEventListener('keydown', (e) => {
+    if (!(e.ctrlKey || e.metaKey) || e.altKey || e.key.toLowerCase() !== 'b') return;
+    if ($('#app').classList.contains('hidden')) return;
+    e.preventDefault();
+    toggleSidebar();
+  });
+
+  // Any dialog backdrop dismisses its own dialog, including the confirm dialog,
+  // whose backdrop previously did nothing.
+  document.addEventListener('click', (e) => {
+    if (e.target.classList.contains('modal-backdrop')) closeModal(e.target.closest('.modal'));
+  });
 
   // Claims ledger. Verdict buttons are delegated — rows are re-rendered on
   // every change, so per-button listeners would be rebound constantly.
@@ -3321,8 +3493,9 @@ async function init() {
   $('#set-advice-prompt').addEventListener('input', onAdviceInput);
   $('#btn-reset-advice').addEventListener('click', resetAdvicePrompt);
 
-  // Esc closes whichever modal is open.
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeSettings(); closeLedger(); } });
+  // Focus containment + Escape for whichever dialog is on top; Escape also
+  // dismisses the mobile drawer when no dialog is open.
+  document.addEventListener('keydown', onOverlayKeydown);
 
   $('#lock-form').addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -3332,6 +3505,8 @@ async function init() {
     } else {
       $('#lock-error').classList.remove('hidden');
       $('#lock-input').value = '';
+      shake($('#lock-form'));
+      $('#lock-input').focus();
     }
   });
 
@@ -3353,6 +3528,7 @@ async function init() {
       message.classList.remove('hidden');
       button.disabled = false;
       button.textContent = 'Sign in';
+      shake($('#auth-form'));
     }
   });
 
