@@ -10,7 +10,7 @@
   <meta name="color-scheme" content="dark light" />
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; base-uri 'self'; connect-src 'self' https://baiojghilzxhkebfblzv.supabase.co wss://baiojghilzxhkebfblzv.supabase.co https://api.github.com https://api.openai.com https://api.anthropic.com https://generativelanguage.googleapis.com https://api.groq.com https://api.cerebras.ai https://openrouter.ai https://api.mistral.ai https://api.cohere.com https://router.huggingface.co; form-action 'self'; frame-src 'none'; img-src 'self' data:; object-src 'none'; script-src 'self' 'sha256-5eVYuI8fUGHf5YW3pItZbeq1y/s4Gh9LXu32ZQYujEk=' 'sha384-fPWur1rx/DE6YtXP/x0MD6dd90RgnVsz5yX/DIg7CcVAnTBZsENWuIcpvVTM39ti' https://cdn.jsdelivr.net; style-src 'self'; upgrade-insecure-requests" />
   <title>Monthly Self-Interrogation</title>
-  <link rel="stylesheet" href="style.css?v=7" />
+  <link rel="stylesheet" href="style.css?v=8" />
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23e0a54b' stroke-width='2'><circle cx='12' cy='12' r='9'/><circle cx='12' cy='12' r='4'/></svg>" />
   <!-- Theme is resolved BEFORE first paint. Applying it in init() meant every
        light-mode load flashed the dark palette first. Any edit here changes the
@@ -182,42 +182,63 @@
           </button>
         </div>
 
-        <div class="card generate-card">
-          <h2 class="card-title">Generate report</h2>
+        <!-- Both sidebar panels collapse. Stacked and expanded they overflow the
+             viewport on desktop, so History could sit below the fold with no way
+             to reach it; the header is the toggle and the state is remembered. -->
+        <div class="card generate-card" id="generate-card">
+          <div class="card-head">
+            <h2 class="card-title">
+              <button class="card-toggle" type="button" data-panel="generate"
+                      aria-expanded="true" aria-controls="generate-body">
+                <svg class="ico ico-chevron" aria-hidden="true"><use href="#i-chevron" /></svg>
+                Generate report
+              </button>
+            </h2>
+          </div>
 
-          <label class="field">
-            <span class="field-label">Target month</span>
-            <input type="month" id="target-month" />
-          </label>
+          <div class="card-body" id="generate-body">
+            <label class="field">
+              <span class="field-label">Target month</span>
+              <input type="month" id="target-month" />
+            </label>
 
-          <label class="field">
-            <span class="field-label">Start date</span>
-            <input type="date" id="range-start" />
-          </label>
+            <label class="field">
+              <span class="field-label">Start date</span>
+              <input type="date" id="range-start" />
+            </label>
 
-          <label class="field">
-            <span class="field-label">End date</span>
-            <input type="date" id="range-end" />
-          </label>
+            <label class="field">
+              <span class="field-label">End date</span>
+              <input type="date" id="range-end" />
+            </label>
 
-          <button id="btn-generate" class="btn btn-primary btn-block" type="button">
-            Generate Monthly Report
-          </button>
+            <button id="btn-generate" class="btn btn-primary btn-block" type="button">
+              Generate Monthly Report
+            </button>
 
-          <div id="progress" class="progress hidden" role="status">
-            <div class="spinner"></div>
-            <span id="progress-text">Working&hellip;</span>
+            <div id="progress" class="progress hidden" role="status">
+              <div class="spinner"></div>
+              <span id="progress-text">Working&hellip;</span>
+            </div>
           </div>
         </div>
 
-        <div class="card history-card">
+        <div class="card history-card" id="history-card">
           <div class="card-head">
-            <h2 class="card-title">History</h2>
+            <h2 class="card-title">
+              <button class="card-toggle" type="button" data-panel="history"
+                      aria-expanded="true" aria-controls="history-body">
+                <svg class="ico ico-chevron" aria-hidden="true"><use href="#i-chevron" /></svg>
+                History
+              </button>
+            </h2>
             <span id="history-count" class="badge">0</span>
           </div>
-          <ul id="history-list" class="history-list">
-            <li class="history-empty muted">No reports yet.</li>
-          </ul>
+          <div class="card-body" id="history-body">
+            <ul id="history-list" class="history-list">
+              <li class="history-empty muted">No reports yet.</li>
+            </ul>
+          </div>
         </div>
 
         <p class="privacy-note muted">
@@ -643,6 +664,6 @@
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.111.0/dist/umd/supabase.min.js"
     integrity="sha384-fPWur1rx/DE6YtXP/x0MD6dd90RgnVsz5yX/DIg7CcVAnTBZsENWuIcpvVTM39ti"
     crossorigin="anonymous" referrerpolicy="no-referrer"></script>
-  <script src="script.js?v=7"></script>
+  <script src="script.js?v=8"></script>
 </body>
 </html>

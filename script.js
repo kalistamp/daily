@@ -102,6 +102,7 @@ const LS = {
   branch:         'msi.branch',
   theme:          'msi.theme',
   sidebar:        'msi.sidebar',
+  panels:         'msi.panels',       // collapsed/expanded sidebar cards
   passHash:       'msi.passHash',
   // key string kept as-is: renaming it would orphan every device's cache
   cache:          'msi.gistCache',
@@ -2459,6 +2460,9 @@ function showProgress(on, text) {
   const p = $('#progress');
   p.classList.toggle('hidden', !on);
   if (text) $('#progress-text').textContent = text;
+  // The progress row sits inside the Generate panel, so a collapsed panel would
+  // swallow it. Work in flight always reopens the panel it belongs to.
+  if (on) setPanel('generate', true);
 }
 
 /* ================================================================= dates */
@@ -3121,6 +3125,49 @@ function applySidebarForViewport() {
   setSidebar(compactView() ? false : localStorage.getItem(LS.sidebar) !== '0', false);
 }
 
+/* ========================================================== sidebar panels */
+/* Generate and History each collapse to their header. Expanded together they
+   are taller than a laptop viewport, which used to push History off the bottom
+   of the sticky column with nothing to scroll. Both default to open. */
+const PANELS = ['generate', 'history'];
+
+function readPanels() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(LS.panels) || '{}');
+    return PANELS.reduce((acc, name) => {
+      acc[name] = raw[name] !== false;   // anything but an explicit false is open
+      return acc;
+    }, {});
+  } catch {
+    return PANELS.reduce((acc, name) => (acc[name] = true, acc), {});
+  }
+}
+
+function setPanel(name, open, persist = true) {
+  const card = $('#' + name + '-card');
+  const btn = $(`.card-toggle[data-panel="${name}"]`);
+  // Guarded: a panel can be absent from the DOM (or renamed) without taking
+  // boot down with it.
+  if (!card || !btn) return;
+  card.classList.toggle('is-collapsed', !open);
+  btn.setAttribute('aria-expanded', String(open));
+  if (!persist) return;
+  const state = readPanels();
+  state[name] = open;
+  try { localStorage.setItem(LS.panels, JSON.stringify(state)); } catch { /* quota */ }
+}
+
+function togglePanel(name) {
+  const card = $('#' + name + '-card');
+  if (!card) return;
+  setPanel(name, card.classList.contains('is-collapsed'));
+}
+
+function applyPanels() {
+  const state = readPanels();
+  PANELS.forEach((name) => setPanel(name, state[name], false));
+}
+
 /* =========================================================== confirm modal */
 function confirmDialog(title, text) {
   return new Promise((resolve) => {
@@ -3506,6 +3553,10 @@ async function init() {
   // crosses the drawer breakpoint.
   $('#btn-sidebar').addEventListener('click', toggleSidebar);
   $$('[data-close-sidebar]').forEach((el) => el.addEventListener('click', () => setSidebar(false)));
+  // Collapsible sidebar panels.
+  $$('.card-toggle[data-panel]').forEach((btn) =>
+    btn.addEventListener('click', () => togglePanel(btn.dataset.panel)));
+  applyPanels();
   compactMQ.addEventListener('change', applySidebarForViewport);
   document.addEventListener('keydown', (e) => {
     if (!(e.ctrlKey || e.metaKey) || e.altKey || e.key.toLowerCase() !== 'b') return;

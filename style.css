@@ -326,6 +326,13 @@ a:hover { text-decoration: underline; }
   position: sticky; top: calc(var(--topbar-h) + 20px);
   display: flex; flex-direction: column; gap: 16px;
   min-width: 0;
+  /* Bounded to the viewport so the column never runs past the fold. Whatever
+     Generate gives up when collapsed goes to History, which scrolls inside.
+     The column's own overflow is the backstop for a viewport too short to hold
+     even the expanded form — nothing gets clipped, it just scrolls. */
+  max-height: calc(100vh - var(--topbar-h) - 44px);
+  overflow-y: auto;
+  scrollbar-width: thin;
 }
 .sidebar-scrim { display: none; }
 /* Only meaningful once the sidebar is an overlay. */
@@ -350,7 +357,37 @@ a:hover { text-decoration: underline; }
 }
 .card-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
 
-.generate-card { display: flex; flex-direction: column; gap: 14px; }
+/* ------------------------------------------------------ collapsible cards */
+/* The button spans the whole header row, so the panel opens from anywhere along
+   the title rather than from the chevron alone. It is nested INSIDE the heading
+   and not the other way round: a heading is flow content and is invalid inside
+   a <button>, and this is the shape assistive tech expects from an accordion. */
+.card-head > .card-title { flex: 1; min-width: 0; }
+.card-toggle {
+  display: flex; align-items: center; gap: 8px;
+  width: 100%;
+  background: none; border: none; padding: 0; margin: 0;
+  font: inherit; color: inherit; cursor: pointer; text-align: left;
+  border-radius: var(--radius-xs);
+  transition: color var(--dur-fast) var(--ease);
+}
+.card-toggle:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--ring); }
+.card-toggle:hover { color: var(--text); }
+.card-toggle:hover .ico-chevron { color: var(--text-2); }
+.ico-chevron {
+  flex: none; color: var(--text-3);
+  transform: rotate(90deg);
+  transition: transform var(--dur-fast) var(--ease);
+}
+.card-toggle[aria-expanded="false"] .ico-chevron { transform: rotate(0deg); }
+/* Collapsed panels keep their header only — no residual gap under it. */
+.card.is-collapsed > .card-head { margin-bottom: 0; }
+.card.is-collapsed > .card-body { display: none; }
+/* A collapsed History must not keep claiming the leftover column height. */
+.history-card.is-collapsed { flex: none; min-height: 0; }
+
+.generate-card { flex: none; }
+.generate-card > .card-body { display: flex; flex-direction: column; gap: 14px; }
 
 .badge {
   font-family: var(--mono); font-size: 11px; color: var(--accent-fg);
@@ -418,7 +455,8 @@ input[type="month"], input[type="date"], input[type="number"] { font-family: var
 @keyframes spin { to { transform: rotate(360deg); } }
 
 /* --------------------------------------------------------------- history */
-.history-card { max-height: 52vh; display: flex; flex-direction: column; }
+.history-card { display: flex; flex-direction: column; min-height: 140px; flex: 1 1 auto; }
+.history-card > .card-body { display: flex; flex-direction: column; min-height: 0; flex: 1 1 auto; }
 .history-list {
   list-style: none; margin: 0; padding: 0;
   overflow-y: auto; display: flex; flex-direction: column; gap: 6px;
@@ -450,7 +488,7 @@ input[type="month"], input[type="date"], input[type="number"] { font-family: var
   display: flex; gap: 6px; flex-wrap: wrap;
 }
 
-.privacy-note { font-size: 11.5px; line-height: 1.5; padding: 0 4px; }
+.privacy-note { font-size: 11.5px; line-height: 1.5; padding: 0 4px; flex: none; }
 .privacy-note code { font-size: 10.5px; }
 
 /* --------------------------------------------------------------- main */
@@ -929,7 +967,11 @@ input[type="month"], input[type="date"], input[type="number"] { font-family: var
   }
   .app[data-sidebar="expanded"] .sidebar-scrim { opacity: 1; pointer-events: auto; }
 
-  .history-card { max-height: none; }
+  /* Drawer mode: the panel already scrolls as one column, so neither card
+     stretches and History is sized by its own rows. */
+  .sidebar { max-height: none; }
+  .history-card { max-height: none; flex: none; }
+  .history-list { overflow-y: visible; }
   .brand-sub { display: none; }
   .report-body { padding: 24px 20px; }
   .btn-label { display: none; }
@@ -991,4 +1033,5 @@ input[type="month"], input[type="date"], input[type="number"] { font-family: var
     scroll-behavior: auto !important;
   }
   .sidebar { transition: none !important; }
+  .ico-chevron { transition: none !important; }
 }
