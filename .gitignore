@@ -1,0 +1,15 @@
+node_modules/
+*.private.*
+daily-private-*
+daily-legacy-*
+review-state*
+.env
+.env.*
+!.env.example
+*.dump
+*.backup
+*.log
+private-*/
+supabase/.temp/
+supabase/.branches/
+test-results/
