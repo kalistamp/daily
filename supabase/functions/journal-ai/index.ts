@@ -13,6 +13,8 @@ Deno.serve(
   handler(async (req) => {
     const { user, admin } = await authorize(req);
     const input = await boundedJson(req);
+    if (!input || typeof input !== "object" || Array.isArray(input))
+      throw Error("INVALID_REQUEST");
     const provider = String(input.provider || ""),
       model = String(input.model || ""),
       p = providers[provider as keyof typeof providers];
@@ -68,7 +70,7 @@ Deno.serve(
             .slice(-16)
             .filter(
               (t: { role?: string; content?: string }) =>
-                ["user", "assistant"].includes(t.role || "") &&
+                t && ["user", "assistant"].includes(t.role || "") &&
                 typeof t.content === "string",
             )
         : [],

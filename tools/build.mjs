@@ -1,10 +1,7 @@
 import { build } from "esbuild";
-import { mkdir, readdir, unlink } from "node:fs/promises";
+import { mkdir, writeFile, rename } from "node:fs/promises";
 await mkdir("assets", { recursive: true });
-for (const file of await readdir("assets")) {
-  if (/^app\.(js|css)(\.map)?$/.test(file)) await unlink(`assets/${file}`);
-}
-await build({
+const result = await build({
   entryPoints: ["src/app.js"],
   bundle: true,
   minify: true,
@@ -12,5 +9,8 @@ await build({
   format: "esm",
   target: "es2022",
   legalComments: "eof",
+  write: false,
 });
+await writeFile("assets/app.js.next", result.outputFiles[0].contents);
+await rename("assets/app.js.next", "assets/app.js");
 console.log("Built static Pages assets. No private data is part of the build.");

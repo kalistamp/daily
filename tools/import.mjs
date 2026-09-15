@@ -277,7 +277,7 @@ export async function remoteClient() {
     token = process.env.JOURNAL_ACCESS_TOKEN;
   if (!url || !key || !token)
     throw new Error(
-      "Set SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY and JOURNAL_ACCESS_TOKEN (owner session with MFA). Never use a service key.",
+      "Set SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY and JOURNAL_ACCESS_TOKEN (signed-in owner session). Never use a service key.",
     );
   if (!/^https:\/\/[a-z0-9]+\.supabase\.co$/.test(url))
     throw new Error("Expected an HTTPS Supabase project URL.");
@@ -308,7 +308,7 @@ export async function remoteClient() {
       body: "{}",
     })
   ).json();
-  if (!permitted) throw new Error("Allowlisted owner with MFA required.");
+  if (permitted !== true) throw new Error("Signed-in allowlisted owner required.");
   return { request, user: user.id };
 }
 export const tables = {
@@ -317,7 +317,8 @@ export const tables = {
   years: "journal_years",
   assets: "journal_assets",
 };
-export async function verifyPackage(pkg, dir, remote) {
+export async function verifyPackage(pkg, dir, remote, { writeReport = true, requireActive = true } = {}) {
+  await assertPrivateOutput(dir);
   const results = [];
   let verifiedEntries=[];
   for (const [kind, items] of Object.entries(pkg.rows)) {
@@ -335,6 +336,8 @@ export async function verifyPackage(pkg, dir, remote) {
         kind === "years" ? r.year === item.year : r.id === item.id,
       );
       if (!got) throw new Error(`Verification failed: missing ${kind} record.`);
+      if ((kind === "entries" || kind === "documents") && got.deleted_at)
+        throw new Error(`Verification failed: ${kind} record is in trash.`);
       for (const [key, value] of Object.entries(item)) {
         const expected =
           key === "object_path" ? `${remote.user}/${value}` : value;
@@ -374,6 +377,11 @@ export async function verifyPackage(pkg, dir, remote) {
   if(yearResults.some(y=>y.entries!==y.actual))throw new Error('Year counts changed during verification.');
   const sourceResults=[...new Set(pkg.rows.entries.map(r=>r.source_key))].map(source=>({source,expected:pkg.rows.entries.filter(r=>r.source_key===source).length,actual:verifiedEntries.filter(r=>r.source_key===source).length}));
   if(sourceResults.some(s=>s.expected!==s.actual))throw new Error('Source counts changed during verification.');
+  if (requireActive) {
+    const batches = await (await remote.request(`/rest/v1/journal_imports?select=id,status&user_id=eq.${remote.user}&id=eq.${pkg.manifest.id}`)).json();
+    if (batches.length !== 1 || batches[0].id !== pkg.manifest.id || batches[0].status !== "active")
+      throw new Error("Import batch is not active. Run the importer to finish activation.");
+  }
   const report = {
     status: "PASS",
     verified_at: new Date().toISOString(),
@@ -386,7 +394,7 @@ export async function verifyPackage(pkg, dir, remote) {
     })),
   };
   if (remote.local) report.status = "PASS_LOCAL_TRANSPORT_ONLY";
-  await writeFile(
+  if (writeReport) await writeFile(
     path.join(
       dir,
       remote.local
@@ -398,6 +406,7 @@ export async function verifyPackage(pkg, dir, remote) {
   return report;
 }
 export async function upload(dir, remote = undefined) {
+  await assertPrivateOutput(dir);
   const pkg = JSON.parse(
     await readFile(path.join(dir, "package.json"), "utf8"),
   );
@@ -448,15 +457,19 @@ export async function upload(dir, remote = undefined) {
       }
       await insert(tables[kind], row);
     }
-  await verifyPackage(pkg, dir, remote);
-  await remote.request(
+  const report = await verifyPackage(pkg, dir, remote, { writeReport: false, requireActive: false });
+  const activated = await remote.request(
     `/rest/v1/journal_imports?id=eq.${pkg.manifest.id}&user_id=eq.${remote.user}`,
     {
       method: "PATCH",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", Prefer: "return=representation" },
       body: JSON.stringify({ status: "active" }),
     },
   );
+  const batches = await activated.json();
+  if (!Array.isArray(batches) || batches.length !== 1 || batches[0].id !== pkg.manifest.id || batches[0].status !== "active")
+    throw new Error("Import verification succeeded but activation was not confirmed. Retry the importer.");
+  await writeFile(path.join(dir, remote.local ? "LOCAL_TRANSPORT_VERIFICATION.json" : "DATABASE_VERIFICATION.json"), JSON.stringify(report, null, 2));
   console.log(
     remote.local
       ? "Local transport verification passed (not a live import)."

@@ -25,19 +25,19 @@ export class CloudBackend {
   async all(table) {
     const rows = [];
     for (let from = 0; ; from += 400) {
-      const page = check(
-        await client
+      let query = client
           .from(table)
           .select("*")
+          .eq("user_id", this.user.id)
           .order(
             table === "journal_years"
               ? "year"
               : table === "daily_items"
                 ? "entity_id"
                 : "id",
-          )
-          .range(from, from + 399),
-      );
+          );
+      if (table === "daily_items") query = query.order("entity_type");
+      const page = check(await query.range(from, from + 399));
       rows.push(...page);
       if (page.length < 400) return rows;
     }
@@ -92,11 +92,11 @@ export class CloudBackend {
     check(await client.rpc("ensure_daily_state"));
     for (let attempt = 0; attempt < 3; attempt++) {
       const before = check(
-        await client.from("daily_sync_state").select("revision").single(),
+        await client.from("daily_sync_state").select("revision").eq("user_id", this.user.id).single(),
       );
       const rows = await this.all("daily_items");
       const after = check(
-        await client.from("daily_sync_state").select("revision").single(),
+        await client.from("daily_sync_state").select("revision").eq("user_id", this.user.id).single(),
       );
       if (before.revision === after.revision) {
         this.revision = Number(after.revision);

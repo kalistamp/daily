@@ -1,6 +1,7 @@
 import { chromium, webkit } from "@playwright/test";
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile, mkdir, readFile } from "node:fs/promises";
+import { mkdtemp, writeFile, mkdir, readFile, rename } from "node:fs/promises";
+import { request as httpRequest } from "node:http";
 import { spawn } from "node:child_process";
 import path from "node:path";
 import os from "node:os";
@@ -19,6 +20,8 @@ const fixture = {
           provider: "openai",
           model: "synthetic-model",
           entryCount: 1,
+          rangeStart: "2026-09-01",
+          rangeEnd: "2026-09-30",
           report: "A synthetic report.",
           reflection: "",
           followups: [{ id: "question", q: "What changed?", a: "" }],
@@ -99,9 +102,83 @@ try {
   await page.goto(base);
   await page.getByRole("heading", { name: "Your private journal" }).waitFor();
   await page.screenshot({ path: path.join(screenshots, "signed-out.png") });
+  // Exercise the actual cloud login path against a synthetic Auth/Data API.
+  const cloud = await browser.newPage();
+  const owner = "11111111-1111-4111-8111-111111111111";
+  const user = {id: owner, email: "synthetic@example.invalid", aud: "authenticated", role: "authenticated"};
+  const encode = value => Buffer.from(JSON.stringify(value)).toString("base64url");
+  const accessToken = `${encode({alg: "HS256", typ: "JWT"})}.${encode({sub: owner, role: "authenticated", aal: "aal1", exp: Math.floor(Date.now()/1000)+3600})}.synthetic`;
+  let factorRequests = 0, cloudRevision = 0, cloudReport = structuredClone(fixture.rows.reports[0]);
+  let historyStarted, releaseHistory;
+  const historyPending = new Promise(resolve => {historyStarted = resolve;});
+  const historyRelease = new Promise(resolve => {releaseHistory = resolve;});
+  await cloud.route("https://baiojghilzxhkebfblzv.supabase.co/**", async route => {
+    const request = route.request(), url = new URL(request.url());
+    let body;
+    if(url.pathname.includes("/factors")) {factorRequests++; body = {};}
+    else if(url.pathname === "/auth/v1/token") body = {access_token: accessToken, refresh_token: "synthetic-refresh", expires_in: 3600, token_type: "bearer", user};
+    else if(url.pathname === "/auth/v1/user") body = user;
+    else if(url.pathname === "/auth/v1/logout") body = {};
+    else if(url.pathname.endsWith("/journal_owners")) body = [{user_id: owner}];
+    else if(url.pathname.endsWith("/journal_imports")) body = [];
+    else if(url.pathname.endsWith("/journal_entries")) body = fixture.rows.entries;
+    else if(url.pathname.endsWith("/journal_years")) body = fixture.rows.years;
+    else if(url.pathname.endsWith("/journal_revisions")) {
+      historyStarted(); await historyRelease;
+      body = [{revision: 1, created_at: "Synthetic private history", snapshot: {body_md: "Private history must stay hidden after sign-out"}}];
+    }
+    else if(url.pathname.endsWith("/journal_documents") || url.pathname.endsWith("/journal_assets")) body = [];
+    else if(url.pathname.endsWith("/ensure_daily_state")) body = cloudRevision;
+    else if(url.pathname.endsWith("/daily_sync_state")) body = {revision: cloudRevision};
+    else if(url.pathname.endsWith("/daily_items")) body = [cloudReport];
+    else if(url.pathname.endsWith("/apply_daily_changes")) {
+      const input = request.postDataJSON();
+      assert.equal(input.expected_revision, cloudRevision);
+      cloudReport = {...cloudReport, data: input.changes[0].data};
+      body = ++cloudRevision;
+    } else if(url.pathname.endsWith("/journal-ai")) body = {text: JSON.stringify({followups:[null,{q:"A synthetic follow-up?"}], claims:[null,{sourceDate:"2026-09-12",quote:""}]})};
+    else if(url.pathname.endsWith("/agent-leaderboard")) body = {agents: []};
+    else throw Error("Unexpected cloud test endpoint: " + url.pathname);
+    await route.fulfill({status: 200, contentType: "application/json", body: JSON.stringify(body)});
+  });
+  await cloud.goto(base);
+  await cloud.getByLabel("Email", {exact:true}).fill(user.email);
+  await cloud.getByLabel("Password", {exact:true}).fill("synthetic-password");
+  await cloud.getByRole("button", {name:"Sign in", exact:true}).click();
+  await cloud.getByLabel("Your reflection", {exact:true}).fill("Synthetic password-only save.");
+  await cloud.getByRole("button", {name:"Save reflection", exact:true}).click();
+  await cloud.getByText("Saved", {exact:true}).waitFor();
+  assert.equal(cloudReport.data.reflection, "Synthetic password-only save.");
+  assert.equal(factorRequests, 0);
+  await cloud.getByRole("button", {name:"Manage report",exact:true}).click();
+  const consent = new Promise(resolve => cloud.once("dialog", async d => {const message=d.message(); await d.accept(); resolve(message);}));
+  await cloud.getByRole("button", {name:"Follow-ups / claims",exact:true}).click();
+  assert.match(await consent, /1 earlier answers\/reflections/);
+  await cloud.getByLabel("A synthetic follow-up?", {exact:true}).waitFor();
+  assert.equal(cloudReport.data.followups.length,2);
+  await cloud.getByRole("button", {name:"Journal", exact:true}).click();
+  await cloud.getByRole("button", {name:"Revision history", exact:true}).click();
+  await historyPending;
+  await cloud.getByRole("button", {name:"Sign out", exact:true}).click();
+  await cloud.getByRole("heading", {name:"Your private journal"}).waitFor();
+  const historyResponse = cloud.waitForResponse(r => r.url().includes("journal_revisions"));
+  releaseHistory(); await historyResponse;
+  await cloud.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  assert.equal(await cloud.locator("dialog[open]").count(), 0);
+  assert.equal(await cloud.getByText("Synthetic private history").count(), 0);
+  assert.equal(await cloud.getByText("Synthetic password-only save.").count(), 0);
+  await cloud.close();
   await page.goto(launch);
   await page.getByRole('heading',{name:'Self-interrogation',exact:true}).waitFor();
   await page.getByLabel('Your reflection',{exact:true}).waitFor();
+  await page.getByLabel('Your reflection',{exact:true}).fill('Draft that must remain protected.');
+  await page.getByRole('button',{name:'Advice directive',exact:true}).click();
+  assert.equal(await page.locator('dialog[open]').count(),0);
+  await page.getByRole('button',{name:'Write today',exact:true}).click();
+  assert.equal(await page.locator('dialog[open]').count(),0);
+  await page.getByLabel('Your reflection',{exact:true}).fill('');
+  await page.getByRole('button',{name:'Save reflection',exact:true}).click();
+  await page.getByText('Saved',{exact:true}).waitFor();
   await page.screenshot({path:path.join(screenshots,'reflection-desktop.png')});
   await page.getByRole('button',{name:'Journal',exact:true}).click();
   await page.getByRole("heading", { name: "2026 journal" }).waitFor();
@@ -244,6 +321,26 @@ try {
   }
   const cookies = await page.context().cookies();
   const cookie = cookies.map((c) => `${c.name}=${c.value}`).join(";");
+  const splitBody = Buffer.from(JSON.stringify({kind:"documents",row:{id:"split-unicode",archive_year:2026,title:"Unicode",body_md:"A synthetic café 雪 entry"}}));
+  const splitAt = splitBody.indexOf(Buffer.from("雪")) + 1;
+  const splitStatus = await new Promise((resolve, reject) => {
+    const req = httpRequest(base + "/__review/save", {method:"POST", headers:{Cookie:cookie, Origin:base, "Content-Type":"application/json"}}, res => {
+      res.resume(); res.on("end", () => resolve(res.statusCode));
+    });
+    req.on("error", reject);
+    req.write(splitBody.subarray(0, splitAt));
+    setTimeout(() => req.end(splitBody.subarray(splitAt)), 20);
+  });
+  assert.equal(splitStatus, 200);
+  const afterSplit = await (await fetch(base + "/__review/data", {headers:{Cookie:cookie}})).json();
+  assert.equal(afterSplit.documents.find(r=>r.id==="split-unicode").body_md,"A synthetic café 雪 entry");
+  // An unwritable staging path must not leave failed changes visible in memory.
+  await mkdir(path.join(folder, "review-state.next"));
+  const failedSave = await fetch(base + "/__review/save", {method:"POST", headers:{Cookie:cookie,Origin:base,"Content-Type":"application/json"},body:JSON.stringify({kind:"documents",row:{id:"failed-save",archive_year:2026,title:"Should not persist",body_md:"Synthetic"}})});
+  assert.equal(failedSave.status,400);
+  const afterFailure = await (await fetch(base + "/__review/data", {headers:{Cookie:cookie}})).json();
+  assert.equal(afterFailure.documents.some(r=>r.id==="failed-save"),false);
+  await rename(path.join(folder,"review-state.next"),path.join(folder,"blocked-persistence-test"));
   assert.equal(
     (
       await fetch(base + "/__review/save", {
@@ -323,7 +420,7 @@ try {
     );
   }
   console.log(
-    "PASS: signed-out shell, every-year create, edit, Unicode, safe preview, history, trash/restore, documents, hash reload, stale conflicts, local access controls, desktop/mobile layout.",
+    "PASS: password-only cloud login/save/sign-out, no MFA requests, delayed history after sign-out, protected drafts, every-year editing, safe Markdown, history, trash/restore, documents, hash reload, conflicts, local access controls, light/dark responsive layouts.",
   );
 } finally {
   await browser?.close();

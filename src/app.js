@@ -68,6 +68,25 @@ let backend,
   generation = 0,
   leaderboard,
   dirty = false;
+let modalDirty = false;
+const tasks = new Set();
+function syncBusy() {
+  app.inert = tasks.size > 0;
+  dialog.inert = tasks.size > 0;
+}
+async function runTask(fn) {
+  if (tasks.size) throw Error("Wait for the current request to finish.");
+  const task = Symbol();
+  tasks.add(task);
+  syncBusy();
+  try {
+    return await fn();
+  } finally {
+    tasks.delete(task);
+    syncBusy();
+  }
+}
+const guardedTask = (fn) => (...args) => action(() => runTask(() => fn(...args)));
 document.title = "Monthly Self-Interrogation";
 document.documentElement.dataset.theme =
   localStorage.getItem("daily-ui-theme") ||
@@ -108,7 +127,10 @@ function download(blob, name) {
   setTimeout(() => URL.revokeObjectURL(url), 30000);
 }
 async function asset(row) {
-  download(await backend.asset(row), row.source_key.split("/").pop());
+  const current = backend, authId = generation;
+  const blob = await current.asset(row);
+  if (current !== backend || authId !== generation) return;
+  download(blob, row.source_key.split("/").pop());
 }
 function markdown(el, text, source) {
   renderMarkdown(el, text, source, data?.assets || [], (row) =>
@@ -116,18 +138,19 @@ function markdown(el, text, source) {
   );
 }
 function closeModal() {
-  if (!dirty || confirm("Discard unsaved changes?")) {
-    dirty = false;
+  if (tasks.size) return;
+  if (!modalDirty || confirm("Discard unsaved changes?")) {
+    modalDirty = false;
     dialog.close();
   }
 }
 function modal(title, body, footer = "") {
-  dirty = false;
+  modalDirty = false;
   dialog.innerHTML = `<header><h2>${esc(title)}</h2>${button("x", "Close", "data-close")}</header><div class="body">${body}</div><footer>${footer || "<button data-close>Close</button>"}</footer>`;
   dialog
     .querySelectorAll("[data-close]")
     .forEach((b) => (b.onclick = closeModal));
-  dialog.oninput = () => (dirty = true);
+  dialog.oninput = () => (modalDirty = true);
   dialog.oncancel = (e) => {
     e.preventDefault();
     closeModal();
@@ -144,6 +167,9 @@ function login(message = "") {
   reportRows = [];
   leaderboard = null;
   dirty = false;
+  modalDirty = false;
+  tasks.clear();
+  syncBusy();
   dialog.close();
   dialog.replaceChildren();
   app.innerHTML = `<main class="auth"><div class="brand">${icon("book-open")}<h1>Daily</h1></div><h2>Your private journal</h2><p>Sign in to continue.</p><form id="login"><label>Email<input name="email" type="email" autocomplete="username" required></label><label>Password<input name="password" type="password" autocomplete="current-password" required></label><div class="error">${esc(message)}</div><button class="primary">Sign in ${icon("shield-check")}</button><button type="button" class="link" id="reset">Reset password</button></form></main>`;
@@ -161,7 +187,7 @@ function login(message = "") {
       if (error) throw error;
       await authenticate(data.session);
     } catch (e) {
-      formError(form, e);
+      login(e.message);
     } finally {
       b.disabled = false;
     }
@@ -175,50 +201,6 @@ function login(message = "") {
     formError(form, error || Error("Check your email for a reset link."));
   };
 }
-async function mfa() {
-  const { data: factors, error } = await client.auth.mfa.listFactors();
-  if (error) throw error;
-  let factor = factors.totp.find((f) => f.status === "verified"),
-    enrollment;
-  if (!factor) {
-    for (const stale of factors.totp)
-      if (stale.status === "unverified")
-        await client.auth.mfa.unenroll({ factorId: stale.id });
-    const result = await client.auth.mfa.enroll({
-      factorType: "totp",
-      friendlyName: "Daily authenticator",
-    });
-    if (result.error) throw result.error;
-    enrollment = result.data;
-    factor = enrollment;
-  }
-  app.innerHTML = `<main class="auth"><div class="brand">${icon("shield-check")}<h1>Daily</h1></div><h2>Two-factor verification</h2>${enrollment ? '<p>Add this account to your authenticator.</p><img id="qr" alt="Authenticator enrollment QR"><p><code id="secret"></code></p>' : ""}<form><label>Authentication code<input name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" required autofocus></label><p class="error"></p><button class="primary">Verify</button><button type="button" id="cancel">Sign out</button></form></main>`;
-  if (enrollment) {
-    document.querySelector("#qr").src = enrollment.totp.qr_code;
-    document.querySelector("#secret").textContent = enrollment.totp.secret;
-  }
-  document.querySelector("#cancel").onclick = () => action(signout);
-  const form = app.querySelector("form");
-  form.onsubmit = async (e) => {
-    e.preventDefault();
-    const b = form.querySelector(".primary");
-    b.disabled = true;
-    try {
-      const { error } = await client.auth.mfa.challengeAndVerify({
-        factorId: factor.id,
-        code: form.elements.code.value,
-      });
-      if (error) throw error;
-      const { data } = await client.auth.getSession();
-      await authenticate(data.session);
-    } catch (e) {
-      formError(form, e);
-    } finally {
-      b.disabled = false;
-    }
-  };
-  redrawIcons();
-}
 async function authenticate(session) {
   const id = ++generation;
   if (!session) return login();
@@ -229,10 +211,6 @@ async function authenticate(session) {
   if (error)
     throw Error("Private database setup is not ready. " + error.message);
   if (!owners?.length) throw Error("This account is not authorized for Daily.");
-  const { data: level, error: levelError } =
-    await client.auth.mfa.getAuthenticatorAssuranceLevel();
-  if (levelError) throw levelError;
-  if (level.currentLevel !== "aal2") return mfa();
   backend = new CloudBackend(session.user);
   await reload();
   await refreshLeaderboard();
@@ -260,7 +238,7 @@ async function reload() {
   render();
 }
 function navigate() {
-  location.hash = `/${year}/${view}`;
+  window.history.pushState(null, "", `#/${year}/${view}`);
 }
 function readRoute() {
   const m = location.hash.match(
@@ -280,6 +258,8 @@ function render() {
         c.year,
         ...data.years.map((y) => y.year),
         ...data.entries.map((e) => e.archive_year),
+        ...data.documents.map((e) => e.archive_year),
+        ...data.assets.map((e) => e.archive_year),
       ]),
     ].sort((a, b) => b - a);
   app.innerHTML = `<header class="topbar"><div class="brand">${icon("book-open")}<div><h1>Daily</h1><small>${backend.local ? "Private local review" : "Private journal"}</small></div>${backend.local ? '<span class="local-badge">LOCAL</span>' : ""}</div><div class="top-actions"><div class="countdown" id="countdown"></div><div class="leader"><select aria-label="Top agents" id="agents"><option>${backend.local ? "Agents unavailable offline" : "Loading agents..."}</option></select><small id="agent-status"><a href="https://arena.ai/leaderboard/agent" target="_blank" rel="noopener noreferrer">Arena · Overall</a></small></div>${button("log-out", "Sign out", 'id="signout"')}</div></header><div class="workspace"><nav class="sidebar" aria-label="Journal"><label><span>YEAR</span><select id="year" aria-label="Year">${years.map((y) => `<option ${y === year ? "selected" : ""}>${y}</option>`).join("")}</select></label>${[
@@ -307,10 +287,8 @@ function render() {
   modes.innerHTML = `<div class="mode-tabs"><button data-view="entries" class="${view === "entries" ? "active" : ""}">${icon("book-open")}Journal</button><button data-view="reports" class="${view === "reports" ? "active" : ""}">${icon("archive")}Self-interrogation</button></div><div class="controls"><button id="write-today">${icon("pencil")}Write today</button>${button("sun-moon", "Toggle light or dark theme", 'id="theme"')}</div>`;
   app.querySelector(".topbar").after(modes);
   document.querySelector("#write-today").onclick = () => {
-    if (dirty && !confirm("Discard unsaved changes?")) return;
-    dirty = false;
-    year = Number(calendarDay().slice(0, 4));
-    editEntry();
+    if (dirty) return notice("Save your reflection and answers first.");
+    editEntry(undefined, Number(calendarDay().slice(0, 4)));
   };
   document.querySelector("#theme").onclick = () => {
     const value =
@@ -444,13 +422,13 @@ function renderEntries() {
   }
   redrawIcons();
 }
-function editEntry(original) {
+function editEntry(original, entryYear = year) {
   const row = original || {
-    archive_year: year,
+    archive_year: entryYear,
     entry_date:
-      year === Number(calendarDay().slice(0, 4))
+      entryYear === Number(calendarDay().slice(0, 4))
         ? calendarDay()
-        : `${year}-01-01`,
+        : `${entryYear}-01-01`,
     title: "",
     body_md: "",
   };
@@ -471,8 +449,9 @@ function editEntry(original) {
     markdown(el, form.elements.body_md.value, row.source_key);
     form.append(el);
   };
-  form.onsubmit = async (e) => {
+  form.onsubmit = guardedTask(async (e) => {
     e.preventDefault();
+    const current = backend, authId = generation;
     const b = dialog.querySelector("[type=submit]");
     b.disabled = true;
     try {
@@ -480,8 +459,9 @@ function editEntry(original) {
         ...Object.fromEntries(new FormData(form)),
         id: original?.id || crypto.randomUUID(),
       });
-      await backend.save("entries", payload, original?.revision);
-      dirty = false;
+      await current.save("entries", payload, original?.revision);
+      if (current !== backend || authId !== generation) return;
+      modalDirty = false;
       dialog.close();
       year = payload.archive_year;
       navigate();
@@ -492,7 +472,7 @@ function editEntry(original) {
     } finally {
       b.disabled = false;
     }
-  };
+  });
 }
 function editDocument(row, kind = "documents") {
   const isYear = kind === "years",
@@ -503,10 +483,11 @@ function editDocument(row, kind = "documents") {
     `<button class="primary" form="document">${icon("save")}Save</button>`,
   );
   const form = document.querySelector("#document");
-  form.onsubmit = async (e) => {
+  form.onsubmit = guardedTask(async (e) => {
     e.preventDefault();
+    const current = backend, authId = generation;
     try {
-      await backend.save(
+      await current.save(
         kind,
         {
           ...Object.fromEntries(new FormData(form)),
@@ -519,16 +500,19 @@ function editDocument(row, kind = "documents") {
         },
         row.revision,
       );
-      dirty = false;
+      if (current !== backend || authId !== generation) return;
+      modalDirty = false;
       dialog.close();
       await reload();
     } catch (e) {
       formError(form, e);
     }
-  };
+  });
 }
 async function history(kind, row) {
-  const items = await backend.history(kind, row.id || row.year);
+  const current = backend, authId = generation, currentView = view, currentYear = year;
+  const items = await current.history(kind, row.id || row.year);
+  if (current !== backend || authId !== generation || currentView !== view || currentYear !== year) return;
   modal(
     "Revision history",
     items.length
@@ -554,8 +538,7 @@ async function history(kind, row) {
           r.snapshot.body_md || r.snapshot.intro_md,
           r.snapshot.source_key,
         );
-        document.querySelector("#restore").onclick = () =>
-          action(async () => {
+        document.querySelector("#restore").onclick = guardedTask(async () => {
             if (
               !confirm(
                 "Restore this revision? The current version will remain in history.",
@@ -576,7 +559,8 @@ async function history(kind, row) {
                       : {}),
                     deleted_at: s.deleted_at || null,
                   };
-            await backend.save(kind, patch, row.revision);
+            await current.save(kind, patch, row.revision);
+            if (current !== backend || authId !== generation) return;
             dialog.close();
             await reload();
           });
@@ -637,12 +621,16 @@ function paintLeaderboard() {
     `<a href="https://arena.ai/leaderboard/agent" target="_blank" rel="noopener noreferrer">Arena · Overall</a>${leaderboard.fetched_at ? " · " + (leaderboard.stale ? "Cached " : "Updated ") + esc(new Date(leaderboard.fetched_at).toLocaleString()) : ""}`;
 }
 async function refreshLeaderboard() {
-  if (backend.local) return;
+  const current = backend, id = generation;
+  if (!current || current.local) return;
+  let result;
   try {
-    leaderboard = await backend.edge("agent-leaderboard", {});
+    result = await current.edge("agent-leaderboard", {});
   } catch {
-    leaderboard = { agents: [] };
+    result = { agents: [] };
   }
+  if (id !== generation || current !== backend) return;
+  leaderboard = result;
   paintLeaderboard();
 }
 async function renderReports() {
@@ -668,6 +656,8 @@ async function renderReports() {
     manageReport: openReport,
     refreshIcons: redrawIcons,
     setDirty: (value) => (dirty = value),
+    runTask,
+    setModalDirty: (value) => (modalDirty = value),
     isCurrent: () =>
       backend === current && view === "reports" && requestId === reportLoad,
   });
@@ -675,9 +665,11 @@ async function renderReports() {
 }
 async function renderLedger() {
   const current = backend;
+  const requestId = ++reportLoad;
   head("Claims ledger", String(year));
-  reportRows = await current.reports();
-  if (current !== backend || view !== "ledger") return;
+  const rows = await current.reports();
+  if (current !== backend || view !== "ledger" || requestId !== reportLoad) return;
+  reportRows = rows;
   const claims = reportRows.filter(
     (r) =>
       r.entity_type === "claim" &&
@@ -704,20 +696,22 @@ function editClaim(item) {
     `<form id="claim"><label>Quote<textarea name="quote" rows="4">${esc(c.quote)}</textarea></label><label>Status<select name="status">${["proposed", "open", "right", "wrong", "partial", "void"].map((s) => `<option ${s === c.status ? "selected" : ""}>${s}</option>`).join("")}</select></label><label>Evidence<textarea name="evidence" rows="4">${esc(c.evidence || "")}</textarea></label><label>Evidence date<input type="date" name="evidenceDate" value="${esc(c.evidenceDate || "")}"></label><p class="error"></p></form>`,
     `<button class="primary" form="claim">Save claim</button>`,
   );
-  document.querySelector("#claim").onsubmit = async (e) => {
+  document.querySelector("#claim").onsubmit = guardedTask(async (e) => {
     e.preventDefault();
+    const current = backend, authId = generation;
     try {
-      await backend.saveReport("claim", item.entity_id, {
+      await current.saveReport("claim", item.entity_id, {
         ...c,
         ...Object.fromEntries(new FormData(e.target)),
       });
-      dirty = false;
+      if (current !== backend || authId !== generation) return;
+      modalDirty = false;
       dialog.close();
       await renderLedger();
     } catch (err) {
       formError(e.target, err);
     }
-  };
+  });
 }
 function savedFocus() {
   return (
@@ -756,6 +750,8 @@ function editPrompt() {
 }
 function openReport(item) {
   const r = structuredClone(item.data);
+  const current = backend, authId = generation;
+  const stillCurrent = () => current === backend && authId === generation;
   modal(
     r.month || "Report",
     '<div class="report-body markdown"></div><h3>Reflection</h3><textarea id="reflection" rows="5"></textarea><div id="followups"></div><p class="error"></p>',
@@ -774,8 +770,7 @@ function openReport(item) {
     el.append(input);
     follow.append(el);
   }
-  document.querySelector("#save-report").onclick = () =>
-    action(async () => {
+  document.querySelector("#save-report").onclick = guardedTask(async () => {
       r.reflection = document.querySelector("#reflection").value;
       r.reflectionUpdatedAt = new Date().toISOString();
       follow.querySelectorAll("textarea").forEach((t) => {
@@ -783,8 +778,9 @@ function openReport(item) {
         r.followups[Number(t.dataset.index)].answeredAt =
           new Date().toISOString();
       });
-      await backend.saveReport("report", item.entity_id, r);
-      dirty = false;
+      await current.saveReport("report", item.entity_id, r);
+      if (!stillCurrent()) return;
+      modalDirty = false;
       dialog.close();
       await renderReports();
       notice("Report saved.");
@@ -795,43 +791,42 @@ function openReport(item) {
       `${r.month || "report"}.md`,
     );
   document.querySelector("#edit-report").onclick = () => {
-    if (dirty && !confirm("Discard unsaved reflection changes?")) return;
+    if (modalDirty && !confirm("Discard unsaved reflection changes?")) return;
     modal(
       "Edit report",
       `<textarea class="editor" id="report-markdown">${esc(r.report)}</textarea>`,
       `<button class="primary" id="save-markdown">Save report</button>`,
     );
-    document.querySelector("#save-markdown").onclick = () =>
-      action(async () => {
-        await backend.saveReport("report", item.entity_id, {
+    document.querySelector("#save-markdown").onclick = guardedTask(async () => {
+        await current.saveReport("report", item.entity_id, {
           ...r,
           report: document.querySelector("#report-markdown").value,
         });
-        dirty = false;
+        if (!stillCurrent()) return;
+        modalDirty = false;
         dialog.close();
         await renderReports();
       });
   };
-  document.querySelector("#delete-report").onclick = () =>
-    action(async () => {
+  document.querySelector("#delete-report").onclick = guardedTask(async () => {
       if (
         !confirm(
           "Delete this report? Export it first if needed. Its server revision history is retained.",
         )
       )
         return;
-      await backend.saveReport("report", item.entity_id, r, true);
-      dirty = false;
+      await current.saveReport("report", item.entity_id, r, true);
+      if (!stillCurrent()) return;
+      modalDirty = false;
       dialog.close();
       await renderReports();
     });
-  document.querySelector("#analyze-report").onclick = () =>
-    action(() => analyzeReport(item));
+  document.querySelector("#analyze-report").onclick = guardedTask(() => analyzeReport(item));
 }
 async function analyzeReport(item) {
   const activeBackend = backend,
     authId = generation;
-  if (dirty) throw Error("Save your reflection first.");
+  if (modalDirty) throw Error("Save your reflection first.");
   const r = item.data,
     entries = data.entries.filter(
       (e) =>
@@ -840,9 +835,10 @@ async function analyzeReport(item) {
         e.entry_date <= (r.rangeEnd || r.requestedEnd),
     );
   if (!entries.length) throw Error("No matching dated entries.");
+  const context = establishedContext(reportRows);
   if (
     !confirm(
-      `Send this report and ${entries.length} entries to ${r.provider} (${r.model}) for follow-up questions and claim extraction?`,
+      `Send this report, ${entries.length} entries and ${context.included} earlier answers/reflections to ${r.provider} (${r.model}) for follow-up questions and claim extraction?`,
     )
   )
     return;
@@ -851,19 +847,19 @@ async function analyzeReport(item) {
     model: r.model,
     operation: "followups",
     report: r.report,
-    context:establishedContext(reportRows),
+    context,
     entries: entries.map((e) => ({ date: e.entry_date, text: e.body_md })),
   });
   if (activeBackend !== backend || authId !== generation) return;
   const parsed = JSON.parse(
     result.text.replace(/^```(?:json)?\s*|\s*```$/g, ""),
   );
-  if (!Array.isArray(parsed.followups) || !Array.isArray(parsed.claims))
+  if (!Array.isArray(parsed?.followups) || !Array.isArray(parsed?.claims))
     throw Error(
       "Provider response was not valid structured output. No changes saved.",
     );
   const followups = parsed.followups
-    .filter((f) => typeof f.q === "string")
+    .filter((f) => f && typeof f.q === "string" && f.q.trim())
     .slice(0, 12)
     .map((f) => ({
       id: crypto.randomUUID(),
@@ -871,22 +867,24 @@ async function analyzeReport(item) {
       a: "",
       why: String(f.why || ""),
     }));
-  await backend.saveReport("report", item.entity_id, {
+  const updatedReport = {
     ...r,
     followups: [...(r.followups || []), ...followups],
-  });
+  };
   let count = 0;
+  try {
+  await activeBackend.saveReport("report", item.entity_id, updatedReport);
   for (const c of parsed.claims.slice(0, 20)) {
     if (activeBackend !== backend || authId !== generation) return;
     if (
-      typeof c.quote !== "string" ||
+      !c || typeof c.quote !== "string" || !c.quote.trim() ||
       !entries.some(
         (e) => e.entry_date === c.sourceDate && e.body_md.includes(c.quote),
       )
     )
       continue;
     const id = crypto.randomUUID();
-    await backend.saveReport("claim", id, {
+    await activeBackend.saveReport("claim", id, {
       id,
       quote: c.quote,
       sourceDate: c.sourceDate,
@@ -896,6 +894,12 @@ async function analyzeReport(item) {
     });
     count++;
   }
+  } catch (error) {
+    if (activeBackend !== backend || authId !== generation) return;
+    download(new Blob([JSON.stringify({report: {entity_id: item.entity_id, data: updatedReport}, claims: parsed.claims, saved_claims: count}, null, 2)], {type:"application/json"}), "daily-private-unsaved-analysis.json");
+    throw Error("Analysis was not fully saved. A private recovery download was created; some results may already be saved. " + error.message);
+  }
+  if (activeBackend !== backend || authId !== generation) return;
   dialog.close();
   await renderReports();
   notice(
@@ -976,7 +980,7 @@ function renderSettings() {
   head("Settings", "Account and private data");
   main().insertAdjacentHTML(
     "beforeend",
-    `<div class="settings"><div class="stats"><div><strong>${data.entries.length}</strong><small>entries</small></div><div><strong>${data.documents.length}</strong><small>documents</small></div><div><strong>${data.assets.length}</strong><small>source assets</small></div></div><section><h3>Year notes</h3><div class="controls"><input id="add-year" type="number" min="1900" max="2200" value="${year}" aria-label="Year for notes"><button id="year-notes">Edit year notes</button></div></section><section><h3>Private export</h3><p>Downloads contain sensitive journal text. Store them outside public repositories and shared folders.</p><button id="export">${icon("download")}Export journal JSON</button><button id="export-year">${icon("download")}Export ${year} Markdown</button></section><section><h3>Import session</h3><p>Temporary owner access token for the local importer. Never commit it or paste it into GitHub.</p><button id="token" ${backend.local ? "disabled" : ""}>${icon("download")}Export temporary session</button></section><section><h3>Legacy browser data</h3><p>Export unsynced local reports before clearing the old cache and credentials. Legacy data is never uploaded automatically.</p><button id="legacy">${icon("download")}Export legacy browser data</button><button id="clear-legacy" class="danger">Clear legacy storage</button></section><section><h3>Account recovery</h3><p>Keep a second authenticator copy in secure offline storage. If all factors are lost, the project administrator must verify your identity before resetting MFA in Supabase. Email password reset does not bypass MFA.</p></section></div>`,
+    `<div class="settings"><div class="stats"><div><strong>${data.entries.length}</strong><small>entries</small></div><div><strong>${data.documents.length}</strong><small>documents</small></div><div><strong>${data.assets.length}</strong><small>source assets</small></div></div><section><h3>Year notes</h3><div class="controls"><input id="add-year" type="number" min="1900" max="2200" value="${year}" aria-label="Year for notes"><button id="year-notes">Edit year notes</button></div></section><section><h3>Private export</h3><p>Downloads contain sensitive journal text. Store them outside public repositories and shared folders.</p><button id="export">${icon("download")}Export journal JSON</button><button id="export-year">${icon("download")}Export ${year} Markdown</button></section><section><h3>Import session</h3><p>Temporary owner access token for the local importer. Never commit it or paste it into GitHub.</p><button id="token" ${backend.local ? "disabled" : ""}>${icon("download")}Export temporary session</button></section><section><h3>Legacy browser data</h3><p>Export unsynced local reports before clearing the old cache and credentials. Legacy data is never uploaded automatically.</p><button id="legacy">${icon("download")}Export legacy browser data</button><button id="clear-legacy" class="danger">Clear legacy storage</button></section><section><h3>Account recovery</h3><p>Keep your password unique and store a recovery method securely. Password reset and account recovery are handled by Supabase Auth.</p></section></div>`,
   );
   document.querySelector("#year-notes").onclick = () => {
     const y = Number(document.querySelector("#add-year").value);
@@ -988,15 +992,18 @@ function renderSettings() {
     );
   };
   document.querySelector("#export").onclick = () =>
-    action(async () =>
+    action(async () => {
+      const current = backend, authId = generation, snapshot = data;
+      const reports = await current.reports();
+      if (current !== backend || authId !== generation) return;
       download(
         new Blob(
           [
             JSON.stringify(
               {
                 exported_at: new Date().toISOString(),
-                ...data,
-                reports: await backend.reports(),
+                ...snapshot,
+                reports,
               },
               null,
               2,
@@ -1005,8 +1012,8 @@ function renderSettings() {
           { type: "application/json" },
         ),
         "daily-private-export.json",
-      ),
-    );
+      );
+    });
   document.querySelector("#export-year").onclick = () =>
     download(
       new Blob(
@@ -1033,6 +1040,8 @@ function renderSettings() {
       const {
         data: { session },
       } = await client.auth.getSession();
+      if (!session || !backend || session.user.id !== backend.user.id)
+        throw Error("Session changed. Please sign in again.");
       download(
         new Blob([session.access_token], { type: "text/plain" }),
         "daily-session.private.txt",
@@ -1091,16 +1100,19 @@ async function exportLegacy() {
   );
 }
 window.addEventListener("beforeunload", (e) => {
-  if (dirty) {
+  if (dirty || modalDirty || tasks.size) {
     e.preventDefault();
     e.returnValue = "";
   }
 });
 window.addEventListener("hashchange", () => {
-  if(dirty){
+  if(tasks.size){window.history.replaceState(null,'',`#/${year}/${view}`);return;}
+  if(dirty || modalDirty){
     if(!confirm('Discard unsaved changes?')){window.history.replaceState(null,'',`#/${year}/${view}`);return;}
     dirty=false;
+    modalDirty=false;
   }
+  dialog.close();
   readRoute();
   if (data) render();
 });
@@ -1128,13 +1140,15 @@ document.addEventListener("visibilitychange", () => {
     paintCountdown();
     if (backend && !backend.local)
       action(async () => {
+        const current = backend, id = generation;
         const {
           data: { session },
         } = await client.auth.getSession();
-        if (!session || session.user.id !== backend.user.id) {
+        if (current !== backend || id !== generation) return;
+        if (!session || session.user.id !== current.user.id) {
           generation++;
           login("Please sign in again.");
-        } else if (!dirty) await reload();
+        } else if (!dirty && !modalDirty && !dialog.open && !tasks.size) await reload();
       });
   }
 });

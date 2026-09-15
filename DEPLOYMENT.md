@@ -1,6 +1,8 @@
 # Production Cutover
 
-Status: local code prepared. Live migration/deployment/import have NOT been run.
+Status: deployment steps are manual. The owner reports applying the initial SQL
+migration and allowlist and pushing the site. Function deployment, private import,
+and live verification must be checked separately.
 Do not interpret a successful Pages push as a completed private-data migration.
 
 ## 1. Preserve recovery
@@ -15,12 +17,12 @@ Export unsynced legacy browser data using Settings before clearing it. These
 exports contain sensitive content and may contain old credentials. Do not commit
 them. The user controls retirement/rotation of the old GitHub and provider keys.
 
-## 2. Apply the scoped database migration
+## 2. Apply the scoped database migrations
 
 Review supabase/migrations/202609120001_journal.sql and run it in the existing
 project's SQL editor as its administrator. It is transactional and re-runnable.
 It creates daily journal tables and private Storage policies, guards existing
-report RPCs with owner/MFA and non-null revision checks, and preserves existing
+report RPCs with owner-access and non-null revision checks, and preserves existing
 report tables/data/history. It does not reset other application schemas.
 
 Add the intended existing Auth user UUID to the allowlist using the SQL editor:
@@ -43,17 +45,22 @@ them. The migration enables the existing revision signal's Realtime publication
 when available. The new client uses explicit refresh/resume with optimistic
 concurrency, so it does not depend on Realtime delivery for correctness.
 
+For both new and existing installations, run
+supabase/migrations/202609140001_email_password_only.sql after the initial
+202609120001_journal.sql migration. It keeps the owner
+allowlist and RLS protections but removes the TOTP/AAL2 requirement. This
+follow-up is required for the email/password-only deployment. If the initial
+migration is already applied, run only the follow-up. Re-running the initial
+migration later would restore its old MFA requirement until the follow-up runs.
+
 ## 3. Auth and recovery
 
 Set the Auth site URL/allowed redirect to https://kalistamp.github.io/daily/.
 For cloud-backed local testing, explicitly allow the chosen loopback development
 URL as an additional redirect. Do not use broad wildcard production redirects.
-Sign in with the allowlisted existing account, enroll the TOTP authenticator and
-verify a six-digit code. The app then requests aal2-protected data.
-
-Test password recovery and a second authenticator copy before relying on MFA.
-An administrator must verify identity and reset factors in the Supabase dashboard
-if all factors are lost. Password reset alone does not bypass journal MFA.
+Sign in with the allowlisted existing account using email and password. This
+deployment does not require TOTP/MFA enrollment. Test password recovery and
+account-session expiry before relying on the journal.
 
 ## 4. Function secrets and deployment
 
@@ -139,7 +146,8 @@ Review private-migration/RECONCILIATION.md and package.json. The frozen policy
 retains written cross-year dates and explicitly flags malformed dates. Correct
 these only with a recorded decision. Duplicate dates are separate UUIDs.
 
-Sign into the configured app with MFA, then Settings > Export temporary session.
+Sign into the configured app with email and password, then Settings > Export
+temporary session.
 Move that private token file to a protected location outside git. In the local
 PowerShell session, set these variables without printing their values:
 
@@ -153,7 +161,7 @@ Remove-Item Env:JOURNAL_ACCESS_TOKEN
 ```
 
 Do not use a service-role key for the importer. It verifies the owner's live
-session and MFA/allowlist gate. It uploads original assets, stages deterministic
+session and allowlist gate. It uploads original assets, stages deterministic
 records, checks all fields/IDs/counts and downloaded asset SHA-256 values, then
 activates the batch. Retrying the same frozen package skips existing primary
 keys and cannot silently overwrite edits. A mismatch fails activation. If a
@@ -172,13 +180,13 @@ Run with a functioning API, not while responses are 503. Save results privately:
 
 1. Signed-out REST, Storage and report/journal RPC calls cannot read or modify
    journal data. Sign-out removes content from the interface.
-2. An unrelated authenticated account and an owner aal1 session cannot access
+2. An unrelated authenticated account cannot access
    entries, documents, history, imports, reports or private objects.
-3. The allowlisted owner with aal2 can read/create/edit each year; date moves,
+3. The allowlisted owner with an email/password session can read/create/edit each year; date moves,
    duplicates, unresolved dates, stale edits, trash/restore and downloads work.
 4. Direct owner-transfer attempts, non-owner inserts, null/stale report revision
    calls and direct *_internal RPC execution are denied.
-5. Password reset, MFA recovery, expired session and account-switch behavior pass.
+5. Password reset, expired session and account-switch behavior pass.
 6. Existing report/claim/prompt/legacy/version counts match the pre-migration
    backup baseline. Open existing reports; edit a reflection/follow-up and confirm
    it survives reload. New reports and source-verified claims work for a configured
@@ -214,7 +222,7 @@ gates pass should Supabase become the sole ongoing primary journal store.
 Keep the old source and encrypted backups. To hide an incomplete import, an
 administrator may mark its journal_imports row staging; do not delete it. Export
 post-import edits, documents, revisions and objects before any rollback. Restoring
-only the old UI will not undo MFA-guarded RPC changes; prefer a forward fix. Any
+only the old UI will not undo guarded RPC changes; prefer a forward fix. Any
 database restore requires its reviewed backup/restore procedure and preservation
 of unrelated shared-project data. Never drop existing reports or rewrite history
 as an implicit rollback.

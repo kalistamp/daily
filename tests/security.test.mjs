@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 import { PGlite } from "@electric-sql/pglite";
 const owner = "11111111-1111-4111-8111-111111111111",
   other = "22222222-2222-4222-8222-222222222222";
-test("migration and forced RLS enforce owner + MFA, revisions, private storage and RPC guards", async () => {
+test("migration and forced RLS enforce owner access, revisions, private storage and RPC guards", async () => {
   const db = new PGlite();
   try {
     await db.exec(`create role anon; create role authenticated; create role service_role bypassrls; create schema auth; create table auth.users(id uuid primary key); insert into auth.users values('${owner}'),('${other}');
@@ -30,8 +30,17 @@ test("migration and forced RLS enforce owner + MFA, revisions, private storage a
       ),
       "utf8",
     );
+    const emailOnly = await readFile(
+      new URL(
+        "../supabase/migrations/202609140001_email_password_only.sql",
+        import.meta.url,
+      ),
+      "utf8",
+    );
     await db.exec(sql);
     await db.exec(sql);
+    await db.exec(emailOnly);
+    await db.exec(emailOnly);
     await db.exec(
       `insert into daily.journal_owners(user_id) values('${owner}'); insert into daily.journal_entries(user_id,archive_year,entry_date,body_md) values('${owner}',2026,'2026-01-01','Synthetic private entry'); insert into storage.objects(bucket_id,name) values('daily-journal','${owner}/file'),('unrelated','public-file');`,
     );
@@ -61,10 +70,11 @@ test("migration and forced RLS enforce owner + MFA, revisions, private storage a
     await session("authenticated", owner, "aal1");
     assert.equal(
       (await db.query("select * from daily.journal_entries")).rows.length,
-      0,
+      1,
     );
-    await assert.rejects(db.query(`select daily.ensure_daily_state()`));
+    assert.equal((await db.query(`select daily.ensure_daily_state() n`)).rows[0].n, 0);
     await session("authenticated", other, "aal2");
+    await assert.rejects(db.query(`select daily.ensure_daily_state()`), /JOURNAL_ACCESS_REQUIRED/);
     assert.equal(
       (await db.query("select * from daily.journal_entries")).rows.length,
       0,
@@ -82,7 +92,7 @@ test("migration and forced RLS enforce owner + MFA, revisions, private storage a
         `insert into daily.journal_entries(user_id,archive_year,body_md) values('${owner}',2026,'Denied')`,
       ),
     );
-    await session("authenticated", owner, "aal2");
+    await session("authenticated", owner, "aal1");
     const row = (await db.query("select * from daily.journal_entries")).rows[0];
     assert.ok(row);
     assert.equal(
@@ -149,6 +159,11 @@ test("migration and forced RLS enforce owner + MFA, revisions, private storage a
       (await db.query(`select daily.apply_daily_changes(0,'[]') n`)).rows[0].n,
       1,
     );
+    await db.exec(`reset role; delete from daily.journal_owners where user_id='${owner}';`);
+    await session("authenticated", owner, "aal1");
+    assert.equal((await db.query("select * from daily.journal_entries")).rows.length, 0);
+    assert.equal((await db.query("select * from storage.objects where bucket_id='daily-journal'")).rows.length, 0);
+    await assert.rejects(db.query(`select daily.apply_daily_changes(1,'[]')`), /JOURNAL_ACCESS_REQUIRED/);
   } finally {
     await db.close();
   }

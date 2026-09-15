@@ -67,7 +67,7 @@ The Actions workflow runs code checks without journal content or database keys.
 
 | Path | Responsibility |
 | --- | --- |
-| src/app.js | Login, MFA, journal editor, documents, archive, reports |
+| src/app.js | Email/password login, journal editor, documents, archive, reports |
 | src/interrogation.js | Main reflection workspace, report history, open reflections and regeneration |
 | supabase/functions/_shared/reflection.mjs | Original report structure and accumulated answer context |
 | src/backend.js | Authenticated Supabase reads and revision-checked writes |
@@ -82,9 +82,11 @@ The Actions workflow runs code checks without journal content or database keys.
 
 ## Security boundaries
 
-Journal access requires an administrator-allowlisted user, ownership and an
-aal2 MFA session. RLS is enforced in Postgres; Storage is private and owner
-prefixed. The public Supabase URL/publishable key are intentionally public.
+Journal access requires an administrator-allowlisted authenticated user and
+ownership. RLS is enforced in Postgres; Storage is private and owner prefixed.
+This deployment intentionally uses email/password authentication without a
+required MFA factor. The public Supabase URL/publishable key are intentionally
+public.
 Service credentials and provider keys belong only in Supabase function secrets.
 
 Journal data remains in memory. User sessions use tab-scoped sessionStorage,

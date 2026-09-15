@@ -4,6 +4,7 @@ import { readFile, writeFile, rename } from "node:fs/promises";
 import { randomBytes, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { entryPayload } from "../src/domain.js";
+import { assertPrivateOutput } from "./import.mjs";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const folder = path.resolve(
   process.env.DAILY_REVIEW_DIR || path.join(root, "../private-migration"),
@@ -14,6 +15,7 @@ const review = process.argv.includes("--review"),
 let data,
   queue = Promise.resolve();
 if (review) {
+  await assertPrivateOutput(folder);
   const pkg = JSON.parse(
     await readFile(path.join(folder, "package.json"), "utf8"),
   );
@@ -127,15 +129,19 @@ const server = http.createServer(async (req, res) => {
         }
       }
       if (req.method === "POST") {
-        let body = "";
+        const chunks = [];
+        let bytes = 0;
         for await (const chunk of req) {
-          body += chunk;
-          if (body.length > 2000000) return json(413, { error: "Too large" });
+          bytes += chunk.length;
+          if (bytes > 2000000) return json(413, { error: "Too large" });
+          chunks.push(chunk);
         }
-        const input = JSON.parse(body);
+        const input = JSON.parse(Buffer.concat(chunks).toString("utf8"));
         queue = queue
           .catch(() => {})
           .then(async () => {
+            const before = structuredClone(data);
+            try {
             if (url.pathname === "/__review/save") {
               const { kind, expected } = input;
               let row = input.row;
@@ -146,7 +152,7 @@ const server = http.createServer(async (req, res) => {
                 ),
                 old = data[kind][index];
               if (kind === "entries") row = entryPayload({ ...old, ...row });
-              if (old && old.revision !== expected)
+              if ((old && old.revision !== expected) || (!old && expected != null))
                 throw Error(
                   "Conflict: this record changed. Your draft was not saved.",
                 );
@@ -189,6 +195,10 @@ const server = http.createServer(async (req, res) => {
               return json(200, { ok: true });
             }
             json(404, { error: "Not found" });
+            } catch (error) {
+              data = before;
+              throw error;
+            }
           });
         await queue;
         return;

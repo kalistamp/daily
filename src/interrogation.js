@@ -19,6 +19,8 @@ export function mountInterrogation({
   refreshIcons,
   setDirty,
   isCurrent,
+  runTask = (fn) => fn(),
+  setModalDirty = () => {},
 }) {
   const now = new Date(),
     month = `${year}-${String(now.getMonth() + 1).padStart(2, "0")}`;
@@ -26,6 +28,28 @@ export function mountInterrogation({
     working = false,
     draftDirty = false;
   let editVersion=0;
+  async function run(fn) {
+    if (working) throw Error("A request is already running.");
+    working = true;
+    try { return await runTask(fn); }
+    finally { working = false; }
+  }
+  function canOpen() {
+    if (working || draftDirty) {
+      notice(working ? "Wait for the current request to finish." : "Save your reflection and answers first.");
+      return false;
+    }
+    return true;
+  }
+  async function saveGenerated(id, value) {
+    try { await backend.saveReport("report", id, value); }
+    catch (error) {
+      if (!isCurrent()) return false;
+      download(new Blob([JSON.stringify(value, null, 2)], {type: "application/json"}), "daily-private-unsaved-reflection.json");
+      throw Error("The response could not be saved. A private recovery download was created. " + error.message);
+    }
+    return isCurrent();
+  }
   const available = rows
     .filter(
       (r) =>
@@ -99,7 +123,8 @@ export function mountInterrogation({
   function draft() {
     if (!selected) return null;
     const r = structuredClone(selected.data);
-    r.title = workspace.querySelector("#reflection-title")?.value || r.title;
+    const title = workspace.querySelector("#reflection-title");
+    if (title) r.title = title.value;
     r.reflection = workspace.querySelector("#reflection-notes")?.value || "";
     r.reflectionUpdatedAt = new Date().toISOString();
     r.generatedAt ||= new Date().toISOString();
@@ -114,8 +139,6 @@ export function mountInterrogation({
   }
   async function save() {
     if (!selected) return;
-    if(working)return;
-    working=true;
     const stamp=editVersion;
     const value = draft();
     const id = selected.entity_id;
@@ -133,7 +156,6 @@ export function mountInterrogation({
       notice(e.message);
       throw e;
     } finally {
-      working=false;
       if (b) b.disabled = false;
     }
   }
@@ -142,7 +164,7 @@ export function mountInterrogation({
     draftDirty = false;
     setDirty(false);
     const r = selected.data;
-    workspace.innerHTML = `<header class="reflection-heading"><div><h2>${esc(r.title || r.month)}</h2><p class="muted">${esc(r.month)}${r.provider ? " · " + esc(r.provider) + " · " + esc(r.model) : ""}${r.entryCount != null ? " · " + r.entryCount + " entries" : ""}</p></div><div class="controls"><button id="reflection-export" title="Export reflection" aria-label="Export reflection">${icon("download")}</button>${r.kind !== "reflection" ? '<button id="report-rewrite">Regenerate with answers</button><button id="report-questions">Ask follow-ups</button>' : ""}</div></header>${r.report ? '<article class="markdown monthly-report" id="monthly-report"></article>' : ""}<section class="reflection-writing"><div class="section-heading"><h3>Your answers & reflections</h3><small id="reflection-status">${r.generatedAt ? "Saved" : "New reflection"}</small></div>${r.kind === "reflection" ? `<label>Title<input id="reflection-title" value="${esc(r.title || "")}" maxlength="180"></label>` : ""}<label class="sr-only" for="reflection-notes">Your reflection</label><textarea id="reflection-notes" rows="8" placeholder="What keeps coming back to you?">${esc(r.reflection || "")}</textarea><div class="controls"><button id="reflection-save" class="primary">${icon("save")}Save reflection</button><button id="reflection-ask">Interrogate this</button></div></section><section id="reflection-questions"></section><section id="reflection-conversation"></section>`;
+    workspace.innerHTML = `<header class="reflection-heading"><div><h2>${esc(r.title || r.month)}</h2><p class="muted">${esc(r.month)}${r.provider ? " · " + esc(r.provider) + " · " + esc(r.model) : ""}${r.entryCount != null ? " · " + esc(r.entryCount) + " entries" : ""}</p></div><div class="controls"><button id="reflection-export" title="Export reflection" aria-label="Export reflection">${icon("download")}</button>${r.kind !== "reflection" ? '<button id="report-rewrite">Regenerate with answers</button><button id="report-questions">Ask follow-ups</button>' : ""}</div></header>${r.report ? '<article class="markdown monthly-report" id="monthly-report"></article>' : ""}<section class="reflection-writing"><div class="section-heading"><h3>Your answers & reflections</h3><small id="reflection-status">${r.generatedAt ? "Saved" : "New reflection"}</small></div>${r.kind === "reflection" ? `<label>Title<input id="reflection-title" value="${esc(r.title || "")}" maxlength="180"></label>` : ""}<label class="sr-only" for="reflection-notes">Your reflection</label><textarea id="reflection-notes" rows="8" placeholder="What keeps coming back to you?">${esc(r.reflection || "")}</textarea><div class="controls"><button id="reflection-save" class="primary">${icon("save")}Save reflection</button><button id="reflection-ask">Interrogate this</button></div></section><section id="reflection-questions"></section><section id="reflection-conversation"></section>`;
     if (r.report)
       markdown(workspace.querySelector("#monthly-report"), r.report);
     workspace.querySelector("#reflection-notes").oninput = changes;
@@ -172,7 +194,7 @@ export function mountInterrogation({
       }
     }
     workspace.querySelector("#reflection-save").onclick = () =>
-      save().catch(() => {});
+      run(save).catch((e) => notice(e.message));
     workspace.querySelector("#reflection-export").onclick = () =>
       download(
         new Blob([JSON.stringify(draft(), null, 2)], {
@@ -188,10 +210,10 @@ export function mountInterrogation({
     workspace
       .querySelector("#report-questions")
       ?.addEventListener("click", () =>
-        followups().catch((e) => notice(e.message)),
+        run(followups).catch((e) => notice(e.message)),
       );
     history();
-    if(r.report&&manageReport){const manage=document.createElement('button');manage.textContent='Manage report';manage.onclick=()=>{if(discard())manageReport(selected);};workspace.querySelector('.reflection-heading .controls').append(manage);}
+    if(r.report&&manageReport){const manage=document.createElement('button');manage.textContent='Manage report';manage.onclick=()=>{if(canOpen())manageReport(selected);};workspace.querySelector('.reflection-heading .controls').append(manage);}
     refreshIcons?.();
   }
   function newReflection() {
@@ -212,19 +234,13 @@ export function mountInterrogation({
     workspace.querySelector("#reflection-notes").focus();
   }
   async function request(operation, payload, message) {
-    if (working) throw Error("A request is already running.");
     if (!confirm(message)) return null;
-    working = true;
-    try {
       const result = await backend.edge("journal-ai", {
         operation,
         ...payload,
       });
       if (!isCurrent()) return null;
       return result;
-    } finally {
-      working = false;
-    }
   }
   function selectedEntries(start, end) {
     return journal.entries
@@ -241,15 +257,12 @@ export function mountInterrogation({
     return `<label>Provider<select name="provider">${["openai", "anthropic", "gemini", "groq", "cerebras", "cohere", "mistral", "openrouter", "huggingface"].map((p) => `<option ${p === provider ? "selected" : ""}>${p}</option>`).join("")}</select></label><label>Model<input name="model" value="${esc(model)}" required placeholder="Approved model ID"></label>`;
   }
   function generateDialog(rewrite = false) {
-    if (draftDirty) {
-      notice("Save your reflection and answers first.");
-      return;
-    }
+    if (!canOpen()) return;
     const current = rewrite ? selected : null;
     const target = current?.data.month || month;
     modal(
       rewrite ? "Regenerate with your answers" : "Monthly self-interrogation",
-      `<form id="interrogation-generate"><div class="fields"><label>Month<input type="month" name="month" value="${target}" required></label><div></div><label>From<input type="date" name="start" value="${current?.data.rangeStart || target + "-01"}" required></label><label>Through<input type="date" name="end" value="${current?.data.rangeEnd || monthEnd(target)}" required></label>${modelFields(current?.data.provider, current?.data.model)}<label class="full checkbox"><input type="checkbox" name="context" checked>Include my earlier answers and reflections</label></div><p class="error"></p></form>`,
+      `<form id="interrogation-generate"><div class="fields"><label>Month<input type="month" name="month" value="${esc(target)}" required></label><div></div><label>From<input type="date" name="start" value="${esc(current?.data.rangeStart || target + "-01")}" required></label><label>Through<input type="date" name="end" value="${esc(current?.data.rangeEnd || monthEnd(target))}" required></label>${modelFields(current?.data.provider, current?.data.model)}<label class="full checkbox"><input type="checkbox" name="context" checked>Include my earlier answers and reflections</label></div><p class="error"></p></form>`,
       `<button class="primary" form="interrogation-generate">${rewrite ? "Regenerate report" : "Generate monthly report"}</button>`,
     );
     const form = document.querySelector("#interrogation-generate");
@@ -257,8 +270,9 @@ export function mountInterrogation({
       form.elements.start.value = form.elements.month.value + "-01";
       form.elements.end.value = monthEnd(form.elements.month.value);
     };
-    form.onsubmit = async (e) => {
+    form.onsubmit = (e) => {
       e.preventDefault();
+      return run(async () => {
       const p = Object.fromEntries(new FormData(form));
       const entries = selectedEntries(p.start, p.end);
       if (!entries.length) {
@@ -298,22 +312,8 @@ export function mountInterrogation({
           followups: current?.data.followups || [],
           conversation: current?.data.conversation || [],
         };
-        try {
-          await backend.saveReport("report", id, value);
-        } catch (error) {
-          download(
-            new Blob([JSON.stringify(value, null, 2)], {
-              type: "application/json",
-            }),
-            "daily-private-unsaved-report.json",
-          );
-          throw Error(
-            "The report was generated but could not be saved. A private recovery download was created. " +
-              error.message,
-          );
-        }
-        if (!isCurrent()) return;
-        setDirty(false);
+        if (!await saveGenerated(id, value)) return;
+        setModalDirty(false);
         document.querySelector("#dialog").close();
         show(replaceRow(id, value));
         notice(
@@ -326,6 +326,7 @@ export function mountInterrogation({
       } finally {
         b.disabled = false;
       }
+      }).catch((err) => notice(err.message));
     };
   }
   async function followups() {
@@ -354,7 +355,7 @@ export function mountInterrogation({
     const parsed = JSON.parse(
       result.text.replace(/^```(?:json)?\s*|\s*```$/g, ""),
     );
-    const input = parsed.followups || parsed.questions;
+    const input = parsed?.followups || parsed?.questions;
     if (!Array.isArray(input))
       throw Error(
         "The response was not valid structured questions. Nothing was changed.",
@@ -368,7 +369,7 @@ export function mountInterrogation({
     const fresh = input
       .filter(
         (f) =>
-          typeof f.q === "string" &&
+          f && typeof f.q === "string" &&
           f.q.trim() &&
           !known.has(f.q.trim().toLowerCase()),
       )
@@ -381,15 +382,12 @@ export function mountInterrogation({
         a: "",
       }));
     const value = { ...r, followups: [...(r.followups || []), ...fresh] };
-    await backend.saveReport("report", current.entity_id, value);
-    if (isCurrent()) show(replaceRow(current.entity_id, value));
+    if (!await saveGenerated(current.entity_id, value)) return;
+    show(replaceRow(current.entity_id, value));
     notice(`${fresh.length} new questions saved.`);
   }
   function conversationDialog() {
-    if (draftDirty) {
-      notice("Save your reflection first.");
-      return;
-    }
+    if (!canOpen()) return;
     if (
       !selected.data.reflection?.trim() &&
       !selected.data.conversation?.length
@@ -405,8 +403,9 @@ export function mountInterrogation({
       `<button class="primary" form="open-interrogation">Ask</button>`,
     );
     const form = document.querySelector("#open-interrogation");
-    form.onsubmit = async (e) => {
+    form.onsubmit = (e) => {
       e.preventDefault();
+      return run(async () => {
       const p = Object.fromEntries(new FormData(form));
       const entries = p.journal
           ? selectedEntries(r.month + "-01", monthEnd(r.month))
@@ -442,9 +441,8 @@ export function mountInterrogation({
             { role: "assistant", content: result.text },
           ],
         };
-        await backend.saveReport("report", current.entity_id, value);
-        if (!isCurrent()) return;
-        setDirty(false);
+        if (!await saveGenerated(current.entity_id, value)) return;
+        setModalDirty(false);
         document.querySelector("#dialog").close();
         show(replaceRow(current.entity_id, value));
       } catch (err) {
@@ -452,6 +450,7 @@ export function mountInterrogation({
       } finally {
         b.disabled = false;
       }
+      }).catch((err) => notice(err.message));
     };
   }
   function monthEnd(value) {
@@ -461,7 +460,7 @@ export function mountInterrogation({
   host.querySelector("#reflection-new").onclick = newReflection;
   host.querySelector("#monthly-new").onclick = () => generateDialog();
   host.querySelector("#advice-directive").onclick = () => {
-    if (!discard()) return;
+    if (!canOpen()) return;
     modal(
       "Advice directive",
       `<textarea id="advice-text" aria-label="Advice directive" class="editor">${esc(advice())}</textarea>`,
@@ -469,8 +468,9 @@ export function mountInterrogation({
     );
     document.querySelector("#advice-reset").onclick = () => {
       document.querySelector("#advice-text").value = DEFAULT_ADVICE;
+      setModalDirty(true);
     };
-    document.querySelector("#advice-save").onclick = async () => {
+    document.querySelector("#advice-save").onclick = () => run(async () => {
       const prior = rows.find(
         (r) => r.entity_type === "prompt" && r.entity_id === "settings",
       );
@@ -481,6 +481,7 @@ export function mountInterrogation({
       };
       try {
         await backend.saveReport("prompt", "settings", value);
+        if (!isCurrent()) return;
         if (prior) prior.data = value;
         else
           rows.push({
@@ -488,13 +489,13 @@ export function mountInterrogation({
             entity_id: "settings",
             data: value,
           });
-        setDirty(false);
+        setModalDirty(false);
         document.querySelector("#dialog").close();
         notice("Advice directive saved.");
       } catch (e) {
         notice(e.message);
       }
-    };
+    }).catch((e) => notice(e.message));
   };
   if (available.length) show(available[0]);
   else newReflection();

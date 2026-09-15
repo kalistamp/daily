@@ -59,11 +59,12 @@ const remote = {
         (r) => r.id === url.searchParams.get("id")?.slice(3),
       );
       Object.assign(row, JSON.parse(opts.body));
-      return new Response("{}");
+      return Response.json([row]);
     }
     const offset = Number(url.searchParams.get("offset") || 0),
       limit = Number(url.searchParams.get("limit") || 400);
-    return Response.json(rows.slice(offset, offset + limit));
+    const id = url.searchParams.get("id")?.slice(3);
+    return Response.json(rows.filter(r => !id || r.id === id).slice(offset, offset + limit));
   },
 };
 // Exercise the real upload/verification algorithm twice, with local in-memory transport.
