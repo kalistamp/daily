@@ -60,7 +60,7 @@ let reportLoad = 0;
 let backend,
   data,
   year = Number(calendarDay().slice(0, 4)),
-  view = "reports",
+  view = "entries",
   query = "",
   limit = 30,
   trash = false,
@@ -68,11 +68,17 @@ let backend,
   generation = 0,
   leaderboard,
   dirty = false;
+let selectedEntryId = null;
+let journalDetailOpen = false;
 let modalDirty = false;
 const tasks = new Set();
 function syncBusy() {
-  app.inert = tasks.size > 0;
-  dialog.inert = tasks.size > 0;
+  const working = tasks.size > 0;
+  app.inert = working;
+  dialog.inert = working;
+  // Drives the sweep bar and the in-button dots; assistive tech gets aria-busy.
+  app.setAttribute("aria-busy", working ? "true" : "false");
+  document.documentElement.classList.toggle("working", working);
 }
 async function runTask(fn) {
   if (tasks.size) throw Error("Wait for the current request to finish.");
@@ -104,8 +110,9 @@ const icon = (name) => `<i data-lucide="${name}"></i>`;
 const button = (name, label, attrs = "") =>
   `<button class="icon" title="${esc(label)}" aria-label="${esc(label)}" ${attrs}>${icon(name)}</button>`;
 const redrawIcons = () => createIcons({ icons });
-function notice(message) {
+function notice(message, tone = "") {
   const n = document.querySelector("#notice");
+  n.className = tone;
   n.textContent = message;
   n.classList.add("visible");
   clearTimeout(notice.timer);
@@ -146,6 +153,7 @@ function closeModal() {
 }
 function modal(title, body, footer = "") {
   modalDirty = false;
+  dialog.classList.remove("studio-editor");
   dialog.innerHTML = `<header><h2>${esc(title)}</h2>${button("x", "Close", "data-close")}</header><div class="body">${body}</div><footer>${footer || "<button data-close>Close</button>"}</footer>`;
   dialog
     .querySelectorAll("[data-close]")
@@ -263,10 +271,10 @@ function render() {
       ]),
     ].sort((a, b) => b - a);
   app.innerHTML = `<header class="topbar"><div class="brand">${icon("book-open")}<div><h1>Daily</h1><small>${backend.local ? "Private local review" : "Private journal"}</small></div>${backend.local ? '<span class="local-badge">LOCAL</span>' : ""}</div><div class="top-actions"><div class="countdown" id="countdown"></div><div class="leader"><select aria-label="Top agents" id="agents"><option>${backend.local ? "Agents unavailable offline" : "Loading agents..."}</option></select><small id="agent-status"><a href="https://arena.ai/leaderboard/agent" target="_blank" rel="noopener noreferrer">Arena · Overall</a></small></div>${button("log-out", "Sign out", 'id="signout"')}</div></header><div class="workspace"><nav class="sidebar" aria-label="Journal"><label><span>YEAR</span><select id="year" aria-label="Year">${years.map((y) => `<option ${y === year ? "selected" : ""}>${y}</option>`).join("")}</select></label>${[
-    ["entries", "book-open", "Entries"],
+    ["entries", "book-open", "Journal"],
+    ["reports", "archive", "Reflections"],
     ["documents", "file-text", "Documents"],
     ["assets", "folder", "Archive"],
-    ["reports", "archive", "Reports"],
     ["ledger", "scale", "Claims ledger"],
   ]
     .map(
@@ -284,8 +292,17 @@ function render() {
   const modes = document.createElement("nav");
   modes.className = "modebar";
   modes.setAttribute("aria-label", "Workspace mode");
-  modes.innerHTML = `<div class="mode-tabs"><button data-view="entries" class="${view === "entries" ? "active" : ""}">${icon("book-open")}Journal</button><button data-view="reports" class="${view === "reports" ? "active" : ""}">${icon("archive")}Self-interrogation</button></div><div class="controls"><button id="write-today">${icon("pencil")}Write today</button>${button("sun-moon", "Toggle light or dark theme", 'id="theme"')}</div>`;
+  modes.innerHTML = `<div class="controls"><button id="write-today">${icon("pencil")}Write today</button>${button("sun-moon", "Toggle light or dark theme", 'id="theme"')}</div>`;
   app.querySelector(".topbar").after(modes);
+  const info = document.createElement("details");
+  info.className = "workspace-info";
+  info.innerHTML = '<summary>Workspace info</summary><div class="workspace-info-panel"></div>';
+  info.querySelector("div").append(app.querySelector(".countdown"), app.querySelector(".leader"));
+  app.querySelector(".top-actions").prepend(info);
+  app.dataset.view = view;
+  app.querySelectorAll(".sidebar [data-view]").forEach(el => {
+    if (el.dataset.view === view) el.setAttribute("aria-current", "page");
+  });
   document.querySelector("#write-today").onclick = () => {
     if (dirty) return notice("Save your reflection and answers first.");
     editEntry(undefined, Number(calendarDay().slice(0, 4)));
@@ -302,17 +319,19 @@ function render() {
       return;
     }
     dirty = false;
+    journalDetailOpen = false;
     year = Number(e.target.value);
     limit = 30;
     query = "";
     navigate();
     render();
   };
-  document.querySelectorAll("[data-view]").forEach(
+  document.querySelectorAll(".sidebar [data-view]").forEach(
     (b) =>
       (b.onclick = () => {
         if (dirty && !confirm("Discard unsaved changes?")) return;
         dirty = false;
+        journalDetailOpen = false;
         view = b.dataset.view;
         query = "";
         limit = 30;
@@ -332,16 +351,50 @@ function render() {
 }
 function paintCountdown() {
   const el = document.querySelector("#countdown");
-  if (el) {
-    const c = countdown();
-    el.innerHTML = `<strong>${c.left}</strong><span>DAYS LEFT IN ${c.year}</span><progress value="${c.total - c.left}" max="${c.total}"></progress>`;
+  if (!el) return;
+  const c = countdown();
+  const pct = Math.min(100, Math.max(0, c.elapsed));
+  const key = `${c.year}-${c.dayOfYear}`;
+  // The 30s tick would otherwise restart the draw animation, so only rebuild on a new day.
+  if (el.dataset.day === key) return;
+  el.dataset.day = key;
+  const cx = 78,
+    cy = 75,
+    ticks = 12;
+  let marks = "";
+  for (let i = 0; i < ticks; i++) {
+    const angle = (i / ticks) * 2 * Math.PI - Math.PI / 2;
+    const sx = cx + Math.cos(angle) * 66,
+      sy = cy + Math.sin(angle) * 66,
+      ex = cx + Math.cos(angle) * 73,
+      ey = cy + Math.sin(angle) * 73;
+    marks += `<line class="cd-tick${(i / ticks) * 100 <= pct ? " spent" : ""}" x1="${sx.toFixed(1)}" y1="${sy.toFixed(1)}" x2="${ex.toFixed(1)}" y2="${ey.toFixed(1)}"/>`;
   }
+  el.innerHTML =
+    `<div class="cd-dial"><svg viewBox="0 0 156 150" aria-hidden="true"><defs><linearGradient id="cd-grad" x1="0" y1="0" x2="1" y2="1"><stop class="cd-stop-a" offset="0%"/><stop class="cd-stop-b" offset="100%"/></linearGradient></defs><g class="cd-ticks">${marks}</g><circle class="cd-track" cx="${cx}" cy="${cy}" r="56" pathLength="100"/><circle class="cd-arc" cx="${cx}" cy="${cy}" r="56" pathLength="100"/><g class="cd-sat"><g transform="translate(${cx},19)"><circle class="cd-pulse" r="5"/><circle class="cd-core" r="4.5"/><circle class="cd-spark" r="1.8"/></g></g></svg><div class="cd-readout"><strong>${c.left}</strong><span>DAYS LEFT</span></div></div>` +
+    `<dl class="cd-stats"><div><dt>Day</dt><dd>${c.dayOfYear} / ${c.total}</dd></div><div><dt>Week</dt><dd>${c.week}</dd></div><div><dt>Quarter</dt><dd>Q${c.quarter}</dd></div><div><dt>Elapsed</dt><dd>${c.elapsed.toFixed(1)}%</dd></div></dl>`;
+  // CSSOM, not a style attribute: inline style attributes are blocked by the page CSP.
+  el.style.setProperty("--pct", pct.toFixed(2));
 }
 const main = () => document.querySelector("#main");
+function skeleton(rows = 3) {
+  const el = document.createElement("div");
+  el.className = "skeleton";
+  el.setAttribute("aria-hidden", "true");
+  el.innerHTML = Array.from({ length: rows })
+    .map(
+      () =>
+        '<div class="sk-card"><span class="sk sk-title"></span><span class="sk"></span><span class="sk"></span><span class="sk sk-short"></span></div>',
+    )
+    .join("");
+  main().append(el);
+}
 function head(title, subtitle, controls = "") {
   main().innerHTML = `<div class="viewhead"><div><h2>${esc(title)}</h2><p>${esc(subtitle)}</p></div><div class="controls">${controls}</div></div>`;
 }
 function renderEntries() {
+  const yearControl = app.querySelector("#year")?.closest("label");
+  const libraryScroll = main().querySelector(".studio-library")?.scrollTop || 0;
   const rows = sortedEntries(
     data.entries.filter(
       (e) =>
@@ -364,10 +417,11 @@ function renderEntries() {
     renderEntries();
     const s = main().querySelector(".search");
     s.focus();
-    s.setSelectionRange(pos, pos);
+    if(pos !== null) s.setSelectionRange(pos, pos);
   };
   document.querySelector("#refresh").onclick = () => action(reload);
   document.querySelector("#trash").onclick = () => {
+    journalDetailOpen = false;
     trash = !trash;
     render();
   };
@@ -384,14 +438,41 @@ function renderEntries() {
     el.querySelector("button").onclick = () => editDocument(intro, "years");
     main().append(el);
   }
-  const list = document.createElement("div");
-  list.className = "entry-list";
-  main().append(list);
-  if (!rows.length)
-    list.innerHTML = `<div class="empty">${icon("book-open")}<p>${query ? "No matching entries." : trash ? "Trash is empty." : "No entries for this year."}</p></div>`;
-  for (const row of rows.slice(0, limit)) {
+
+  const studio = document.createElement('div');
+  studio.className = 'journal-studio' + (journalDetailOpen ? ' detail-open' : '');
+  studio.innerHTML = '<section class="studio-library" aria-label="Journal entries"><div class="library-tools"></div><div class="studio-index"></div></section><section class="studio-detail" aria-label="Selected entry"></section>';
+  main().append(studio);
+  studio.querySelector('.library-tools').append(main().querySelector('.search'));
+  if (yearControl) studio.querySelector('.library-tools').prepend(yearControl);
+  const notes = main().querySelector('.intro');
+  if(notes) studio.querySelector('.library-tools').append(notes);
+  const list = studio.querySelector('.studio-index'), reader = studio.querySelector('.studio-detail');
+  if(!rows.some(row => row.id === selectedEntryId)) selectedEntryId = rows[0]?.id || null;
+  let group = '';
+  for(const row of rows.slice(0,limit)) {
+    const month = row.entry_date?.slice(0,7) || 'Undated';
+    if(month !== group) {
+      const h = document.createElement('h3'); h.className = 'entry-month';
+      h.textContent = month === 'Undated' ? month : new Date(month + '-01T12:00:00').toLocaleDateString(undefined,{month:'long',year:'numeric'});
+      list.append(h); group = month;
+    }
+    const item = document.createElement('button'); item.className = 'entry-choice';
+    item.setAttribute('aria-current',String(row.id === selectedEntryId));
+    item.innerHTML = '<small>' + esc(row.entry_date || 'Date to review') + '</small><strong>' + esc(row.title || 'Untitled entry') + '</strong><span>' + esc(row.body_md.replace(/[#*_>]/g,'').replace(/\s+/g,' ').slice(0,110)) + '</span>';
+    item.onclick = () => { selectedEntryId=row.id; journalDetailOpen=true; renderEntries(); main().querySelector('.studio-reading h2')?.focus(); };
+    list.append(item);
+  }
+  if(!rows.length) {
+    journalDetailOpen = false;
+    studio.classList.remove('detail-open');
+    list.innerHTML = '<div class="empty"><p>' + (query ? 'No matching entries.' : trash ? 'Trash is empty.' : 'Your notebook starts here.') + '</p><small>' + (query ? 'Try another title, date, or phrase.' : 'Choose New entry to begin writing.') + '</small></div>';
+    reader.innerHTML = '<div class="studio-placeholder"><h2>Room for your thoughts</h2><p>Select an entry to read, or start a new page.</p></div>';
+  }
+  const row = rows.find(row => row.id === selectedEntryId);
+  if(row) {
     const el = document.createElement("article");
-    el.className = "entry";
+    el.className = "entry studio-reading";
     el.innerHTML = `<div class="entry-head"><div><h2>${esc(row.entry_date || "Date to review")}${row.title ? " · " + esc(row.title) : ""}</h2>${row.review_note ? `<span class="flag">${esc(row.review_note)}</span>` : ""}<small>${esc(row.source_key || "Created in Daily")}</small></div><div class="entry-actions">${button("pencil", "Edit entry", "data-edit")}${button("history", "Revision history", "data-history")}${button(trash ? "rotate-ccw" : "trash-2", trash ? "Restore entry" : "Move entry to trash", "data-delete")}</div></div><div class="markdown"></div>`;
     markdown(el.querySelector(".markdown"), row.body_md, row.source_key);
     el.querySelector("[data-edit]").onclick = () => editEntry(row);
@@ -408,18 +489,22 @@ function renderEntries() {
         );
         await reload();
       });
-    list.append(el);
+
+    el.querySelector('h2').tabIndex = -1;
+    el.querySelector('h2').textContent = row.title || "Untitled entry";
+    const date = document.createElement('p');
+    date.className = 'studio-entry-date';
+    date.textContent = row.entry_date || 'Date to review';
+    el.querySelector('h2').before(date);
+    const back = document.createElement('button'); back.className='studio-back'; back.textContent='← All entries';
+    back.onclick=()=>{journalDetailOpen=false; studio.classList.remove('detail-open'); list.querySelector('[aria-current="true"]')?.focus();};
+    reader.append(back,el);
   }
-  if (rows.length > limit) {
-    const more = document.createElement("button");
-    more.className = "pagination";
-    more.textContent = `Load more (${rows.length - limit} remaining)`;
-    more.onclick = () => {
-      limit += 30;
-      renderEntries();
-    };
-    list.append(more);
+  if(rows.length > limit) {
+    const more=document.createElement('button'); more.className='pagination'; more.textContent='Load more entries';
+    more.onclick=()=>{limit+=30;renderEntries();}; list.append(more);
   }
+  studio.querySelector('.studio-library').scrollTop = libraryScroll;
   redrawIcons();
 }
 function editEntry(original, entryYear = year) {
@@ -438,22 +523,63 @@ function editEntry(original, entryYear = year) {
     `<button type="button" id="preview">Preview</button><button class="primary" type="submit" form="editor">${icon("save")}Save entry</button>`,
   );
   const form = document.querySelector("#editor");
+  dialog.classList.add("studio-editor");
+  const fields = form.querySelector(".fields");
+  const titleLabel = form.elements.title.closest("label");
+  const bodyLabel = form.elements.body_md.closest("label");
+  titleLabel.classList.add("studio-title");
+  bodyLabel.classList.add("studio-body-label");
+  form.elements.title.placeholder = "Untitled entry";
+  form.elements.body_md.placeholder = "What is on your mind?";
+  const details = document.createElement("details");
+  details.className = "editor-details";
+  details.innerHTML = "<summary>Entry details · date, year & review note</summary>";
+  form.prepend(titleLabel, bodyLabel, details);
+  details.append(fields);
+  form.addEventListener("invalid", () => { details.open = true; }, true);
+  const saveState = document.createElement("small");
+  saveState.id = "entry-save-state";
+  saveState.setAttribute("role", "status");
+  saveState.textContent = original ? "Saved entry" : "Not saved yet";
+  const counter = document.createElement("small");
+  counter.id = "entry-count";
+  counter.className = "editor-meta";
+  dialog.querySelector("footer").prepend(saveState, counter);
+  const paintCount = () => {
+    const text = form.elements.body_md.value;
+    const words = (text.match(/\S+/g) || []).length;
+    counter.textContent = `${words} word${words === 1 ? "" : "s"} · ${text.length} characters`;
+  };
+  form.addEventListener("input", () => { saveState.textContent = "Unsaved changes"; paintCount(); });
+  form.querySelector(".error").setAttribute("role", "alert");
+  paintCount();
+  form.elements.body_md.focus();
   document.querySelector("#preview").onclick = () => {
     let el = form.querySelector(".preview");
     if (el) {
       el.remove();
+      bodyLabel.hidden = false;
+      document.querySelector("#preview").textContent = "Preview";
+      document.querySelector("#preview").setAttribute("aria-pressed", "false");
+      form.elements.body_md.focus();
       return;
     }
     el = document.createElement("div");
     el.className = "markdown preview";
     markdown(el, form.elements.body_md.value, row.source_key);
-    form.append(el);
+    bodyLabel.after(el);
+    bodyLabel.hidden = true;
+    document.querySelector("#preview").textContent = "Continue writing";
+    document.querySelector("#preview").setAttribute("aria-pressed", "true");
+    el.tabIndex = -1;
+    el.focus();
   };
   form.onsubmit = guardedTask(async (e) => {
     e.preventDefault();
     const current = backend, authId = generation;
     const b = dialog.querySelector("[type=submit]");
     b.disabled = true;
+    saveState.textContent = "Saving…";
     try {
       const payload = entryPayload({
         ...Object.fromEntries(new FormData(form)),
@@ -464,10 +590,17 @@ function editEntry(original, entryYear = year) {
       modalDirty = false;
       dialog.close();
       year = payload.archive_year;
+      selectedEntryId = payload.id;
+      journalDetailOpen = true;
+      view = "entries";
+      query = "";
+      trash = false;
       navigate();
       await reload();
-      notice("Entry saved.");
+      notice("Entry saved.", "ok");
+      main().querySelector('.studio-reading h2')?.focus();
     } catch (e) {
+      saveState.textContent = "Not saved";
       formError(form, e);
     } finally {
       b.disabled = false;
@@ -576,6 +709,7 @@ function renderDocuments() {
   );
   document.querySelector("#newdoc").onclick = () =>
     editDocument({ archive_year: year, title: "", body_md: "" });
+  if (!rows.length) main().insertAdjacentHTML("beforeend", `<div class="empty">${icon("file-text")}<p>No documents for ${year}.</p><small>Supporting notes and references live here, separate from dated entries.</small></div>`);
   for (const row of rows) {
     const el = document.createElement("div");
     el.className = "doc-row";
@@ -593,6 +727,10 @@ function renderDocuments() {
 function renderAssets() {
   const rows = data.assets.filter((r) => r.archive_year === year);
   head(`${year} archive`, `${rows.length} preserved source files`);
+  if (!rows.length) {
+    main().insertAdjacentHTML("beforeend", `<div class="empty">${icon("folder")}<p>No preserved source files for ${year}.</p><small>Original files appear here after an import.</small></div>`);
+    return;
+  }
   const table = document.createElement("table");
   table.className = "table";
   table.innerHTML =
@@ -635,7 +773,8 @@ async function refreshLeaderboard() {
 }
 async function renderReports() {
   const requestId = ++reportLoad;
-  head("Self-interrogation", "Loading your reflections...");
+  head("Self-interrogation", `${year} · loading your reflections`);
+  skeleton(2);
   const current = backend;
   const rows = await current.reports();
   if (current !== backend || view !== "reports" || requestId !== reportLoad)
@@ -667,6 +806,7 @@ async function renderLedger() {
   const current = backend;
   const requestId = ++reportLoad;
   head("Claims ledger", String(year));
+  skeleton(2);
   const rows = await current.reports();
   if (current !== backend || view !== "ledger" || requestId !== reportLoad) return;
   reportRows = rows;
@@ -675,10 +815,9 @@ async function renderLedger() {
       r.entity_type === "claim" &&
       String(r.data.sourceDate || "").startsWith(String(year)),
   );
+  main().querySelector(".skeleton")?.remove();
+  if (!claims.length) main().insertAdjacentHTML("beforeend", `<div class="empty">${icon("scale")}<p>No claims recorded for ${year}.</p><small>Claims are extracted when you run Follow-ups on a monthly report.</small></div>`);
   if (claims.length) {
-    const h = document.createElement("h3");
-    h.textContent = "Claims";
-    main().append(h);
     for (const item of claims) {
       const el = document.createElement("div");
       el.className = "doc-row";
@@ -783,7 +922,7 @@ function openReport(item) {
       modalDirty = false;
       dialog.close();
       await renderReports();
-      notice("Report saved.");
+      notice("Report saved.", "ok");
     });
   document.querySelector("#export-report").onclick = () =>
     download(
@@ -1067,7 +1206,7 @@ function renderSettings() {
             req.onblocked = () =>
               reject(Error("Close older Daily tabs before clearing."));
           });
-      notice("Legacy storage cleared.");
+      notice("Legacy storage cleared.", "ok");
     });
 }
 async function exportLegacy() {
@@ -1113,6 +1252,7 @@ window.addEventListener("hashchange", () => {
     modalDirty=false;
   }
   dialog.close();
+  journalDetailOpen = false;
   readRoute();
   if (data) render();
 });

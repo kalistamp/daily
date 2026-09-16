@@ -16,15 +16,32 @@ export function validDate(value) {
   const date = new Date(`${value}T00:00:00Z`);
   return !isNaN(date) && date.toISOString().slice(0, 10) === value;
 }
+export function isoWeek(day) {
+  const date = new Date(`${day}T00:00:00Z`);
+  const weekday = (date.getUTCDay() + 6) % 7;
+  date.setUTCDate(date.getUTCDate() - weekday + 3);
+  const firstThursday = new Date(Date.UTC(date.getUTCFullYear(), 0, 4));
+  firstThursday.setUTCDate(
+    firstThursday.getUTCDate() - ((firstThursday.getUTCDay() + 6) % 7) + 3,
+  );
+  return 1 + Math.round((date - firstThursday) / (7 * 86400000));
+}
 export function countdown(now = new Date()) {
   const day = calendarDay(now),
     year = Number(day.slice(0, 4));
   const end = Date.UTC(year + 1, 0, 1),
     start = Date.UTC(year, 0, 1);
+  const total = (end - start) / 86400000;
+  const left = Math.round((end - Date.parse(`${day}T00:00:00Z`)) / 86400000);
+  const dayOfYear = total - left + 1;
   return {
     year,
-    left: Math.round((end - Date.parse(`${day}T00:00:00Z`)) / 86400000),
-    total: (end - start) / 86400000,
+    left,
+    total,
+    dayOfYear,
+    week: isoWeek(day),
+    quarter: Math.floor(Number(day.slice(5, 7) - 1) / 3) + 1,
+    elapsed: (dayOfYear / total) * 100,
   };
 }
 export function sortedEntries(entries) {

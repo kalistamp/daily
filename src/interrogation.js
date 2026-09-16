@@ -71,7 +71,10 @@ export function mountInterrogation({
     draftDirty = true;
     setDirty(true);
     const status = workspace.querySelector("#reflection-status");
-    if (status) status.textContent = "Unsaved";
+    if (status) {
+      status.textContent = "Unsaved";
+      status.dataset.state = "unsaved";
+    }
   }
   function discard() {
     if (working) {
@@ -150,7 +153,9 @@ export function mountInterrogation({
       selected = replaceRow(id, value);
       draftDirty = stamp!==editVersion;
       setDirty(draftDirty);
-      workspace.querySelector("#reflection-status").textContent = draftDirty?'Unsaved':'Saved';
+      const status = workspace.querySelector("#reflection-status");
+      status.textContent = draftDirty ? "Unsaved" : "Saved";
+      status.dataset.state = draftDirty ? "unsaved" : "saved";
       history();
     } catch (e) {
       notice(e.message);
@@ -164,10 +169,20 @@ export function mountInterrogation({
     draftDirty = false;
     setDirty(false);
     const r = selected.data;
-    workspace.innerHTML = `<header class="reflection-heading"><div><h2>${esc(r.title || r.month)}</h2><p class="muted">${esc(r.month)}${r.provider ? " · " + esc(r.provider) + " · " + esc(r.model) : ""}${r.entryCount != null ? " · " + esc(r.entryCount) + " entries" : ""}</p></div><div class="controls"><button id="reflection-export" title="Export reflection" aria-label="Export reflection">${icon("download")}</button>${r.kind !== "reflection" ? '<button id="report-rewrite">Regenerate with answers</button><button id="report-questions">Ask follow-ups</button>' : ""}</div></header>${r.report ? '<article class="markdown monthly-report" id="monthly-report"></article>' : ""}<section class="reflection-writing"><div class="section-heading"><h3>Your answers & reflections</h3><small id="reflection-status">${r.generatedAt ? "Saved" : "New reflection"}</small></div>${r.kind === "reflection" ? `<label>Title<input id="reflection-title" value="${esc(r.title || "")}" maxlength="180"></label>` : ""}<label class="sr-only" for="reflection-notes">Your reflection</label><textarea id="reflection-notes" rows="8" placeholder="What keeps coming back to you?">${esc(r.reflection || "")}</textarea><div class="controls"><button id="reflection-save" class="primary">${icon("save")}Save reflection</button><button id="reflection-ask">Interrogate this</button></div></section><section id="reflection-questions"></section><section id="reflection-conversation"></section>`;
+    workspace.innerHTML = `<header class="reflection-heading"><div><h2>${esc(r.title || r.month)}</h2><p class="muted">${esc(r.month)}${r.provider ? " · " + esc(r.provider) + " · " + esc(r.model) : ""}${r.entryCount != null ? " · " + esc(r.entryCount) + " entries" : ""}</p></div><div class="controls"><button id="reflection-export" title="Export reflection" aria-label="Export reflection">${icon("download")}</button>${r.kind !== "reflection" ? '<button id="report-rewrite">Regenerate with answers</button><button id="report-questions">Ask follow-ups</button>' : ""}</div></header>${r.report ? '<article class="markdown monthly-report" id="monthly-report"></article>' : ""}<section class="reflection-writing"><div class="section-heading"><h3>Your answers & reflections</h3><div class="writing-meta"><small id="reflection-words"></small><small id="reflection-status" data-state="${r.generatedAt ? "saved" : "new"}">${r.generatedAt ? "Saved" : "New reflection"}</small></div></div>${r.kind === "reflection" ? `<label>Title<input id="reflection-title" value="${esc(r.title || "")}" maxlength="180"></label>` : ""}<label class="sr-only" for="reflection-notes">Your reflection</label><textarea id="reflection-notes" rows="8" placeholder="What keeps coming back to you?">${esc(r.reflection || "")}</textarea><div class="controls"><button id="reflection-save" class="primary">${icon("save")}Save reflection</button><button id="reflection-ask">Interrogate this</button></div></section><section id="reflection-questions"></section><section id="reflection-conversation"></section>`;
     if (r.report)
       markdown(workspace.querySelector("#monthly-report"), r.report);
-    workspace.querySelector("#reflection-notes").oninput = changes;
+    const notes = workspace.querySelector("#reflection-notes"),
+      wordEl = workspace.querySelector("#reflection-words");
+    const paintWords = () => {
+      const words = (notes.value.match(/\S+/g) || []).length;
+      wordEl.textContent = words ? `${words} word${words === 1 ? "" : "s"}` : "";
+    };
+    notes.oninput = () => {
+      paintWords();
+      changes();
+    };
+    paintWords();
     const title = workspace.querySelector("#reflection-title");
     if (title) title.oninput = changes;
     const questions = workspace.querySelector("#reflection-questions");
@@ -320,6 +335,7 @@ export function mountInterrogation({
           rewrite
             ? "Report regenerated. Your answers are preserved."
             : "Monthly report saved.",
+          "ok",
         );
       } catch (err) {
         form.querySelector(".error").textContent = err.message;
@@ -384,7 +400,7 @@ export function mountInterrogation({
     const value = { ...r, followups: [...(r.followups || []), ...fresh] };
     if (!await saveGenerated(current.entity_id, value)) return;
     show(replaceRow(current.entity_id, value));
-    notice(`${fresh.length} new questions saved.`);
+    notice(`${fresh.length} new questions saved.`, "ok");
   }
   function conversationDialog() {
     if (!canOpen()) return;
@@ -491,7 +507,7 @@ export function mountInterrogation({
           });
         setModalDirty(false);
         document.querySelector("#dialog").close();
-        notice("Advice directive saved.");
+        notice("Advice directive saved.", "ok");
       } catch (e) {
         notice(e.message);
       }
