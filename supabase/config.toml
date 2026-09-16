@@ -1,6 +1,0 @@
-# Deploy functions individually. Do not db reset or push shared project configuration.
-[functions.agent-leaderboard]
-verify_jwt = false
-[functions.journal-ai]
-verify_jwt = false
-# Both handlers validate the bearer token with Auth and journal_access() themselves.
