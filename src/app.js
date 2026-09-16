@@ -27,6 +27,10 @@ import {
   countdown,
   sortedEntries,
   entryPayload,
+  entryMeta,
+  entryBucket,
+  weekdayLabel,
+  shortDate,
 } from "./domain.js";
 import { renderMarkdown } from "./markdown.js";
 import { mountInterrogation } from "./interrogation.js";
@@ -70,6 +74,7 @@ let backend,
   dirty = false;
 let selectedEntryId = null;
 let journalDetailOpen = false;
+let expanded = new Set();
 let modalDirty = false;
 const tasks = new Set();
 function syncBusy() {
@@ -394,22 +399,24 @@ function head(title, subtitle, controls = "") {
 }
 function renderEntries() {
   const yearControl = app.querySelector("#year")?.closest("label");
-  const libraryScroll = main().querySelector(".studio-library")?.scrollTop || 0;
+  const keepScroll = window.scrollY;
+  const q = query.trim().toLowerCase();
   const rows = sortedEntries(
-    data.entries.filter(
-      (e) =>
-        e.archive_year === year &&
-        Boolean(e.deleted_at) === trash &&
-        (!query ||
-          (e.body_md + " " + e.title + " " + e.entry_date)
-            .toLowerCase()
-            .includes(query.toLowerCase())),
-    ),
+    data.entries.filter((e) => {
+      if (e.archive_year !== year || Boolean(e.deleted_at) !== trash) return false;
+      if (!q) return true;
+      const meta = entryMeta(e);
+      return (
+        e.body_md + " " + meta.title + " " + meta.topics.join(" ") + " " + (e.entry_date || "")
+      )
+        .toLowerCase()
+        .includes(q);
+    }),
   );
   head(
     `${year} journal`,
-    `${rows.length} ${trash ? "deleted " : ""}entries`,
-    `<input class="search" type="search" aria-label="Search entries" placeholder="Search entries" value="${esc(query)}">${button("refresh-cw", "Refresh", 'id="refresh"')}${button(trash ? "book-open" : "trash-2", trash ? "Show entries" : "Show trash", 'id="trash"')}<button class="primary" id="new">${icon("plus")}New entry</button>`,
+    `${rows.length} ${trash ? "deleted " : ""}${rows.length === 1 ? "entry" : "entries"}`,
+    `<input class="search" type="search" aria-label="Search entries" placeholder="Search topics, dates, text" value="${esc(query)}">${button("refresh-cw", "Refresh", 'id="refresh"')}${button(trash ? "book-open" : "trash-2", trash ? "Show entries" : "Show trash", 'id="trash"')}<button class="primary" id="new">${icon("plus")}New entry</button>`,
   );
   main().querySelector(".search").oninput = (e) => {
     query = e.target.value;
@@ -417,96 +424,175 @@ function renderEntries() {
     renderEntries();
     const s = main().querySelector(".search");
     s.focus();
-    if(pos !== null) s.setSelectionRange(pos, pos);
+    if (pos !== null) s.setSelectionRange(pos, pos);
   };
   document.querySelector("#refresh").onclick = () => action(reload);
   document.querySelector("#trash").onclick = () => {
-    journalDetailOpen = false;
     trash = !trash;
+    expanded.clear();
     render();
   };
   document.querySelector("#new").onclick = () => editEntry();
-  const intro = data.years.find((y) => y.year === year)||{year,intro_md:''};
-  if (!trash && !query) {
+
+  const intro = data.years.find((y) => y.year === year) || { year, intro_md: "" };
+  if (!trash && !q) {
     const el = document.createElement("details");
     el.className = "intro";
-    el.innerHTML = `<summary aria-label="Year Notes"><span class="notes-icon">${icon('notebook-pen')}</span><span class="notes-title">Year Notes</span><span class="notes-year">${year}</span><span class="notes-chevron">${icon('chevron-down')}</span></summary><div class="notes-content"><div class="markdown"></div><button>${icon("pencil")}${intro.intro_md?'Edit notes':'Add notes'}</button></div>`;
-    el.open=sessionStorage.getItem('daily-ui-notes-'+year)==='open';
-    el.ontoggle=()=>sessionStorage.setItem('daily-ui-notes-'+year,el.open?'open':'closed');
+    el.innerHTML = `<summary aria-label="Year Notes"><span class="notes-icon">${icon("notebook-pen")}</span><span class="notes-title">Year Notes</span><span class="notes-year">${year}</span><span class="notes-chevron">${icon("chevron-down")}</span></summary><div class="notes-content"><div class="markdown"></div><button>${icon("pencil")}${intro.intro_md ? "Edit notes" : "Add notes"}</button></div>`;
+    el.open = sessionStorage.getItem("daily-ui-notes-" + year) === "open";
+    el.ontoggle = () => sessionStorage.setItem("daily-ui-notes-" + year, el.open ? "open" : "closed");
     markdown(el.querySelector(".markdown"), intro.intro_md);
-    if(!intro.intro_md)el.querySelector('.markdown').textContent='No year notes yet.';
+    if (!intro.intro_md) el.querySelector(".markdown").textContent = "No year notes yet.";
     el.querySelector("button").onclick = () => editDocument(intro, "years");
     main().append(el);
   }
 
-  const studio = document.createElement('div');
-  studio.className = 'journal-studio' + (journalDetailOpen ? ' detail-open' : '');
-  studio.innerHTML = '<section class="studio-library" aria-label="Journal entries"><div class="library-tools"></div><div class="studio-index"></div></section><section class="studio-detail" aria-label="Selected entry"></section>';
-  main().append(studio);
-  studio.querySelector('.library-tools').append(main().querySelector('.search'));
-  if (yearControl) studio.querySelector('.library-tools').prepend(yearControl);
-  const notes = main().querySelector('.intro');
-  if(notes) studio.querySelector('.library-tools').append(notes);
-  const list = studio.querySelector('.studio-index'), reader = studio.querySelector('.studio-detail');
-  if(!rows.some(row => row.id === selectedEntryId)) selectedEntryId = rows[0]?.id || null;
-  let group = '';
-  for(const row of rows.slice(0,limit)) {
-    const month = row.entry_date?.slice(0,7) || 'Undated';
-    if(month !== group) {
-      const h = document.createElement('h3'); h.className = 'entry-month';
-      h.textContent = month === 'Undated' ? month : new Date(month + '-01T12:00:00').toLocaleDateString(undefined,{month:'long',year:'numeric'});
-      list.append(h); group = month;
+  if (!rows.length) {
+    const empty = document.createElement("div");
+    empty.className = "feed-empty";
+    empty.innerHTML = `<p>${query ? "No matching entries." : trash ? "Trash is empty." : "Your notebook starts here."}</p><small>${query ? "Try another topic, date, or phrase." : trash ? "Deleted entries can be restored here." : "Choose New entry to begin writing."}</small>`;
+    main().append(empty);
+    redrawIcons();
+    return;
+  }
+
+  const visible = rows.slice(0, limit);
+  const today = calendarDay();
+  const groups = [];
+  let current = null;
+  for (const row of visible) {
+    const bucket = entryBucket(row.entry_date, today);
+    if (!current || current.key !== bucket.key) {
+      current = { key: bucket.key, label: bucket.label, rows: [] };
+      groups.push(current);
     }
-    const item = document.createElement('button'); item.className = 'entry-choice';
-    item.setAttribute('aria-current',String(row.id === selectedEntryId));
-    item.innerHTML = '<small>' + esc(row.entry_date || 'Date to review') + '</small><strong>' + esc(row.title || 'Untitled entry') + '</strong><span>' + esc(row.body_md.replace(/[#*_>]/g,'').replace(/\s+/g,' ').slice(0,110)) + '</span>';
-    item.onclick = () => { selectedEntryId=row.id; journalDetailOpen=true; renderEntries(); main().querySelector('.studio-reading h2')?.focus(); };
-    list.append(item);
+    current.rows.push(row);
   }
-  if(!rows.length) {
-    journalDetailOpen = false;
-    studio.classList.remove('detail-open');
-    list.innerHTML = '<div class="empty"><p>' + (query ? 'No matching entries.' : trash ? 'Trash is empty.' : 'Your notebook starts here.') + '</p><small>' + (query ? 'Try another title, date, or phrase.' : 'Choose New entry to begin writing.') + '</small></div>';
-    reader.innerHTML = '<div class="studio-placeholder"><h2>Room for your thoughts</h2><p>Select an entry to read, or start a new page.</p></div>';
+
+  const feed = document.createElement("div");
+  feed.className = "journal-feed";
+  const jump = document.createElement("div");
+  jump.className = "feed-jump";
+  jump.setAttribute("aria-label", "Journal tools and time navigation");
+  const anyOpen = visible.some((r) => expanded.has(r.id));
+  jump.innerHTML =
+    `<div class="feed-tools"><button class="jump-toggle" data-toggle="${anyOpen ? "collapse" : "expand"}">${anyOpen ? "Collapse all" : "Expand all"}</button></div>` +
+    `<div class="feed-anchors">${groups
+      .map(
+        (g) =>
+          `<button class="jump-chip" data-jump="grp-${esc(g.key)}">${esc(g.label)}<span>${g.rows.length}</span></button>`,
+      )
+      .join("")}</div>`;
+  feed.append(jump);
+  const tools = jump.querySelector(".feed-tools");
+  if (yearControl) {
+    yearControl.classList.add("feed-year");
+    tools.prepend(yearControl);
   }
-  const row = rows.find(row => row.id === selectedEntryId);
-  if(row) {
-    const el = document.createElement("article");
-    el.className = "entry studio-reading";
-    el.innerHTML = `<div class="entry-head"><div><h2>${esc(row.entry_date || "Date to review")}${row.title ? " · " + esc(row.title) : ""}</h2>${row.review_note ? `<span class="flag">${esc(row.review_note)}</span>` : ""}<small>${esc(row.source_key || "Created in Daily")}</small></div><div class="entry-actions">${button("pencil", "Edit entry", "data-edit")}${button("history", "Revision history", "data-history")}${button(trash ? "rotate-ccw" : "trash-2", trash ? "Restore entry" : "Move entry to trash", "data-delete")}</div></div><div class="markdown"></div>`;
-    markdown(el.querySelector(".markdown"), row.body_md, row.source_key);
-    el.querySelector("[data-edit]").onclick = () => editEntry(row);
-    el.querySelector("[data-history]").onclick = () =>
-      action(() => history("entries", row));
-    el.querySelector("[data-delete]").onclick = () =>
+  tools.insertBefore(main().querySelector(".search"), tools.querySelector(".jump-toggle"));
+
+  const listWrap = document.createElement("div");
+  listWrap.className = "feed-list";
+  feed.append(listWrap);
+
+  const renderBody = (card, row) => {
+    if (!row) return;
+    const body = card.querySelector(".day-body");
+    if (body.dataset.ready) return;
+    body.dataset.ready = "1";
+    const md = document.createElement("div");
+    md.className = "markdown";
+    body.append(md);
+    markdown(md, row.body_md, row.source_key);
+    const actions = document.createElement("div");
+    actions.className = "entry-actions day-actions";
+    actions.innerHTML = `${button("pencil", "Edit entry", "data-edit")}${button("history", "Revision history", "data-history")}${button(trash ? "rotate-ccw" : "trash-2", trash ? "Restore entry" : "Move entry to trash", "data-delete")}`;
+    body.append(actions);
+    actions.querySelector("[data-edit]").onclick = () => editEntry(row);
+    actions.querySelector("[data-history]").onclick = () => action(() => history("entries", row));
+    actions.querySelector("[data-delete]").onclick = () =>
       action(async () => {
-        if (!trash && !confirm("Move this entry to trash? It can be restored."))
-          return;
+        if (!trash && !confirm("Move this entry to trash? It can be restored.")) return;
         await backend.save(
           "entries",
           { id: row.id, deleted_at: trash ? null : new Date().toISOString() },
           row.revision,
         );
+        expanded.delete(row.id);
         await reload();
       });
+    redrawIcons();
+  };
 
-    el.querySelector('h2').tabIndex = -1;
-    el.querySelector('h2').textContent = row.title || "Untitled entry";
-    const date = document.createElement('p');
-    date.className = 'studio-entry-date';
-    date.textContent = row.entry_date || 'Date to review';
-    el.querySelector('h2').before(date);
-    const back = document.createElement('button'); back.className='studio-back'; back.textContent='← All entries';
-    back.onclick=()=>{journalDetailOpen=false; studio.classList.remove('detail-open'); list.querySelector('[aria-current="true"]')?.focus();};
-    reader.append(back,el);
+  for (const group of groups) {
+    const section = document.createElement("section");
+    section.className = "feed-group";
+    section.id = "grp-" + group.key;
+    const heading = document.createElement("h3");
+    heading.className = "feed-group-head";
+    heading.innerHTML = `${esc(group.label)}<span class="feed-group-count">${group.rows.length}</span>`;
+    section.append(heading);
+    for (const row of group.rows) {
+      const meta = entryMeta(row);
+      const card = document.createElement("details");
+      card.className = "day-card";
+      card.dataset.id = row.id;
+      const when = row.entry_date
+        ? `<span class="day-dow">${esc(weekdayLabel(row.entry_date))}</span><span class="day-date">${esc(shortDate(row.entry_date))}</span>`
+        : `<span class="day-dow">&mdash;</span><span class="day-date">Undated</span>`;
+      const chips = meta.topics
+        .slice(0, 5)
+        .map((t) => `<span class="topic-chip">${esc(t)}</span>`)
+        .join("");
+      const more = meta.topics.length > 5 ? `<span class="topic-more">+${meta.topics.length - 5} more</span>` : "";
+      const count = meta.itemCount
+        ? `<span class="day-count">${meta.itemCount} item${meta.itemCount === 1 ? "" : "s"}</span>`
+        : "";
+      const flag = row.review_note ? `<span class="flag">${esc(row.review_note)}</span>` : "";
+      const showSummary =
+        meta.summary && meta.summary.toLowerCase() !== meta.displayTitle.toLowerCase();
+      card.innerHTML =
+        `<summary><div class="day-when">${when}</div><div class="day-main"><div class="day-title-row"><span class="day-title">${esc(meta.displayTitle)}</span>${count}</div>${chips || more ? `<div class="day-topics">${chips}${more}</div>` : ""}${showSummary ? `<p class="day-summary">${esc(meta.summary)}</p>` : ""}${flag}</div><span class="day-chevron">${icon("chevron-down")}</span></summary><div class="day-body"></div>`;
+      card.addEventListener("toggle", () => {
+        if (card.open) {
+          expanded.add(row.id);
+          renderBody(card, row);
+        } else {
+          expanded.delete(row.id);
+        }
+      });
+      if (expanded.has(row.id)) card.open = true;
+      section.append(card);
+    }
+    listWrap.append(section);
   }
-  if(rows.length > limit) {
-    const more=document.createElement('button'); more.className='pagination'; more.textContent='Load more entries';
-    more.onclick=()=>{limit+=30;renderEntries();}; list.append(more);
+
+  jump.querySelectorAll("[data-jump]").forEach((b) => {
+    b.onclick = () =>
+      document.getElementById(b.dataset.jump)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  });
+  jump.querySelector("[data-toggle]").onclick = (e) => {
+    const expand = e.currentTarget.dataset.toggle === "expand";
+    for (const card of listWrap.querySelectorAll(".day-card")) card.open = expand;
+    e.currentTarget.dataset.toggle = expand ? "collapse" : "expand";
+    e.currentTarget.textContent = expand ? "Collapse all" : "Expand all";
+  };
+
+  main().append(feed);
+  if (rows.length > limit) {
+    const more = document.createElement("button");
+    more.className = "pagination";
+    more.textContent = `Load ${Math.min(30, rows.length - limit)} more (${rows.length - limit} remaining)`;
+    more.onclick = () => {
+      limit += 30;
+      renderEntries();
+    };
+    feed.append(more);
   }
-  studio.querySelector('.studio-library').scrollTop = libraryScroll;
+  if (keepScroll) window.scrollTo(0, keepScroll);
   redrawIcons();
 }
+
 function editEntry(original, entryYear = year) {
   const row = original || {
     archive_year: entryYear,
@@ -590,15 +676,14 @@ function editEntry(original, entryYear = year) {
       modalDirty = false;
       dialog.close();
       year = payload.archive_year;
-      selectedEntryId = payload.id;
-      journalDetailOpen = true;
+      expanded.add(payload.id);
       view = "entries";
       query = "";
       trash = false;
       navigate();
       await reload();
       notice("Entry saved.", "ok");
-      main().querySelector('.studio-reading h2')?.focus();
+      main().querySelector(`.day-card[data-id="${payload.id}"] summary`)?.scrollIntoView({ block: "center" });
     } catch (e) {
       saveState.textContent = "Not saved";
       formError(form, e);

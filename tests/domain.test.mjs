@@ -7,6 +7,10 @@ import {
   entryPayload,
   sortedEntries,
   resolveSource,
+  entryMeta,
+  entryBucket,
+  weekdayLabel,
+  shortDate,
 } from "../src/domain.js";
 import { splitJournal, normalizeDate, uuid } from "../tools/import.mjs";
 import {
@@ -131,4 +135,46 @@ test("fixed provider endpoints and response adapters", () => {
     }),
     "ok",
   );
+});
+
+test("entryMeta derives a real title from a date-only report body", () => {
+  const meta = entryMeta({
+    title: "",
+    body_md:
+      "* **9Router** — a free local AI-model router.\n* **Dify** — open-source LLM app platform.\n* **Hostinger VPS** — cheap Linux box.\n",
+  });
+  assert.equal(meta.title, "9Router");
+  assert.equal(meta.displayTitle, "9Router");
+  assert.deepEqual(meta.topics, ["9Router", "Dify", "Hostinger VPS"]);
+  assert.equal(meta.itemCount, 3);
+  assert.ok(meta.summary.includes("9Router"));
+});
+
+test("entryMeta prefers an explicit title and falls back gracefully", () => {
+  assert.equal(entryMeta({ title: "Real Title", body_md: "**Topic** text" }).title, "Real Title");
+  assert.equal(entryMeta({ body_md: "### Heading here\n\nsome text" }).title, "Heading here");
+  assert.equal(entryMeta({ body_md: "Just a plain first sentence. Second." }).title, "Just a plain first sentence.");
+  assert.equal(entryMeta({ body_md: "" }).displayTitle, "Untitled entry");
+});
+
+test("entryMeta dedupes topics case-insensitively and counts numbered items", () => {
+  const meta = entryMeta({ body_md: "1. **Alpha** one\n2. **alpha** two\n3. **Beta** three\n" });
+  assert.deepEqual(meta.topics, ["Alpha", "Beta"]);
+  assert.equal(meta.itemCount, 3);
+});
+
+test("entryBucket groups entries by recency relative to a given day", () => {
+  const today = "2026-09-16"; // Wednesday; ISO week starts Monday 2026-09-14
+  assert.equal(entryBucket("2026-09-15", today).key, "this-week");
+  assert.equal(entryBucket("2026-09-11", today).key, "last-week");
+  assert.equal(entryBucket("2026-09-02", today).key, "earlier-month");
+  assert.equal(entryBucket("2026-08-20", today).label, "August 2026");
+  assert.equal(entryBucket("2026-01-01", today).label, "January 2026");
+  assert.equal(entryBucket(null, today).key, "undated");
+});
+
+test("weekday and short-date labels", () => {
+  assert.equal(weekdayLabel("2026-09-11"), "Fri");
+  assert.equal(shortDate("2026-09-11"), "Sep 11");
+  assert.equal(weekdayLabel("not-a-date"), "");
 });
